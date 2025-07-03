@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"maps"
 
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -25,6 +26,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	llmdOptv1alpha1 "github.com/llm-d-incubation/inferno-autoscaler/api/v1alpha1"
+	"github.com/llm-d-incubation/inferno-autoscaler/internal/modelanalyzer"
 	infernoConfig "github.com/llm-inferno/optimizer/pkg/config"
 	inferno "github.com/llm-inferno/optimizer/pkg/core"
 	infernoManager "github.com/llm-inferno/optimizer/pkg/manager"
@@ -51,41 +53,6 @@ type AcceleratorModelInfo struct {
 
 func (r *OptimizerReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	_ = logf.FromContext(ctx)
-
-	// get system data
-	systemData, err := readStaticData()
-	if err != nil {
-		logf.Log.Error(err, "unable to read data")
-		return ctrl.Result{}, err
-	}
-
-	// TODO: read capacity data
-
-	// initialize dynamic server data
-	systemData.Spec.Servers = infernoConfig.ServerData{
-		Spec: make([]infernoConfig.ServerSpec, 0),
-	}
-
-	// call Collector
-	// set: systemData.Spec.Servers.Spec
-
-	// optimize
-	system := inferno.NewSystem()
-	optimizerSpec := system.SetFromSpec(&systemData.Spec)
-
-	optimizer := infernoSolver.NewOptimizerFromSpec(optimizerSpec)
-	manager := infernoManager.NewManager(system, optimizer)
-	system.Calculate()
-	if err := manager.Optimize(); err != nil {
-		logf.Log.Error(err, "failed to optimize")
-		return ctrl.Result{}, err
-	}
-	allocationSolution := system.GenerateSolution()
-	logf.Log.Info("system", system)
-	logf.Log.Info("allocationSolution", allocationSolution)
-
-	//call Actuator
-	// use allocationSolution
 
 	// get inventory
 	var nodeList corev1.NodeList
@@ -118,6 +85,67 @@ func (r *OptimizerReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	}
 
 	logf.Log.Info("current inventory in the cluster", "capacity", newInventory)
+
+	// get system data
+	systemData, err := readStaticData()
+	if err != nil {
+		logf.Log.Error(err, "unable to read static data")
+		return ctrl.Result{}, err
+	}
+	// initialize dynamic server data
+	systemData.Spec.Servers = infernoConfig.ServerData{
+		Spec: make([]infernoConfig.ServerSpec, 0),
+	}
+	// set optimizer configuration
+	// TODO: make it configurable
+	systemData.Spec.Optimizer = infernoConfig.OptimizerData{
+		Spec: infernoConfig.OptimizerSpec{
+			Unlimited:     false,
+			Heterogeneous: false,
+			MILPSolver:    false,
+			UseCplex:      false,
+		},
+	}
+
+	// TODO: read capacity data from inventory
+
+	// call Collector
+	// set: systemData.Spec.Servers.Spec
+
+	// analyze
+	system := inferno.NewSystem()
+	modelanalyzer := modelanalyzer.NewModelAnalyzer(system)
+	for _, s := range system.Servers() {
+		allAllocations := make(map[string]*inferno.Allocation)
+		allocations, err := modelanalyzer.AnalyzeModel(ctx, s.Name())
+		if err != nil {
+			logf.Log.Error(err, "failed to analyze")
+			return ctrl.Result{}, err
+		}
+		for acceleratorName, alloc := range allocations {
+			if s.CurAllocation() != nil {
+				penalty := s.CurAllocation().TransitionPenalty(alloc)
+				alloc.SetValue(penalty)
+			}
+			allAllocations[acceleratorName] = alloc
+		}
+		maps.Copy(s.AllAllocations(), allAllocations)
+	}
+
+	// optimize
+	optimizerSpec := system.SetFromSpec(&systemData.Spec)
+	optimizer := infernoSolver.NewOptimizerFromSpec(optimizerSpec)
+	manager := infernoManager.NewManager(system, optimizer)
+	if err := manager.Optimize(); err != nil {
+		logf.Log.Error(err, "failed to optimize")
+		return ctrl.Result{}, err
+	}
+	allocationSolution := system.GenerateSolution()
+	logf.Log.Info("system", system)
+	logf.Log.Info("allocationSolution", allocationSolution)
+
+	//call Actuator
+	// use allocationSolution
 
 	return ctrl.Result{}, nil
 }

@@ -10,5 +10,4 @@ const (
 	CapacityFileName     = "capacity-data.json"
 	ModelFileName        = "model-data.json"
 	ServiceClassFileName = "serviceclass-data.json"
-	OptimizerFileName    = "optimizer-data.json"
 )
