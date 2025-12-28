@@ -47,8 +47,10 @@ import (
 	"github.com/llm-d-incubation/workload-variant-autoscaler/internal/collector/prometheus"
 	"github.com/llm-d-incubation/workload-variant-autoscaler/internal/config"
 	"github.com/llm-d-incubation/workload-variant-autoscaler/internal/controller"
+	"github.com/llm-d-incubation/workload-variant-autoscaler/internal/engines/predictive"
 	"github.com/llm-d-incubation/workload-variant-autoscaler/internal/engines/saturation"
 	"github.com/llm-d-incubation/workload-variant-autoscaler/internal/engines/scalefromzero"
+	"github.com/llm-d-incubation/workload-variant-autoscaler/internal/interfaces"
 	"github.com/llm-d-incubation/workload-variant-autoscaler/internal/logging"
 	"github.com/llm-d-incubation/workload-variant-autoscaler/internal/metrics"
 	"github.com/llm-d-incubation/workload-variant-autoscaler/internal/utils"
@@ -80,6 +82,7 @@ func main() {
 
 		webhookCertPath, webhookCertName, webhookCertKey string
 		watchNamespace                                   string
+		latencyPredictorURL                              string
 	)
 	// Leader election configuration
 	var (
@@ -117,6 +120,8 @@ func main() {
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
 	flag.StringVar(&watchNamespace, "watch-namespace", "",
 		"Namespace to watch for updates. If unspecified, all namespaces are watched.")
+	flag.StringVar(&latencyPredictorURL, "latency-predictor-url", "",
+		"The URL of the Latency Predictor service (e.g. http://predictor:8080). If empty, mock predictor is used.")
 	flag.IntVar(&loggerVerbosity, "v", logging.DEFAULT, "number for the log level verbosity")
 
 	// Leader election timeout configuration flags
@@ -409,7 +414,44 @@ func main() {
 	}))
 
 	if err != nil {
-		setupLog.Error(err, "unable to add optimization engine loop to manager")
+		setupLog.Error(err, "unable to add scale from zero engine loop to manager")
+		os.Exit(1)
+	}
+
+	// Register predictive engine loop with the manager.
+	// For now, we use a Mock predictor client until the real one is implemented.
+	// In production, this would be configured via flags/config.
+	err = mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
+		var predictorClient predictive.LatencyPredictorClient
+		var engineMetricsCollector interfaces.MetricsCollector
+
+		if latencyPredictorURL != "" {
+			setupLog.Info("Using Real HTTP Latency Predictor Client", "url", latencyPredictorURL)
+			predictorClient = predictive.NewHTTPLatencyPredictorClient(latencyPredictorURL)
+			// Use real Prometheus collector if we have a real predictor
+			engineMetricsCollector = metricsCollector
+		} else {
+			setupLog.Info("Using MOCK Latency Predictor Client (E2E Mode)")
+			predictorClient = &predictive.MockLatencyPredictorClient{
+				MockITL:  25.0, // Simulate LATENCY VIOLATION (Target=20) -> Should scale UP
+				MockTTFT: 100.0,
+			}
+			engineMetricsCollector = &predictive.MockMetricsCollector{}
+		}
+
+		engine := predictive.NewEngine(
+			mgr.GetClient(),
+			mgr.GetScheme(),
+			mgr.GetEventRecorderFor("workload-variant-autoscaler-predictive-engine"),
+			engineMetricsCollector,
+			predictorClient,
+		)
+		go engine.StartOptimizeLoop(ctx)
+		return nil
+	}))
+
+	if err != nil {
+		setupLog.Error(err, "unable to add predictive engine loop to manager")
 		os.Exit(1)
 	}
 

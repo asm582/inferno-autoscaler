@@ -19,6 +19,13 @@ type ReplicaMetrics struct {
 	Cost            float64 // Cost per replica (from CRD spec, default 10)
 	// Metadata contains freshness information (optional)
 	Metadata *ReplicaMetricsMetadata `json:"metadata,omitempty"`
+
+	// Latency Metrics (Optional - used by Predictive Engine)
+	ArrivalRate  float64 // Requests per second/minute
+	AvgInputLen  float64 // Tokens
+	AvgOutputLen float64 // Tokens
+	AvgITL       float64 // ms
+	AvgTTFT      float64 // ms
 }
 
 // ReplicaMetricsMetadata contains freshness information for replica metrics

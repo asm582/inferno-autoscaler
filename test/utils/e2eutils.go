@@ -418,7 +418,7 @@ func GetProjectDir() (string, error) {
 	}
 
 	// Handle both test packages
-	m := regexp.MustCompile(`/test/(e2e-saturation-based|e2e)`)
+	m := regexp.MustCompile(`/test/(e2e-saturation-based|e2e-predictive|e2e)`)
 	wd = m.ReplaceAllString(wd, "")
 	return wd, nil
 }

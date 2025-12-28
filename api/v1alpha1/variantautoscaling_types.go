@@ -26,6 +26,21 @@ type VariantAutoscalingSpec struct {
 	// +kubebuilder:validation:Pattern=`^\d+(\.\d+)?$`
 	// +kubebuilder:default="10.0"
 	VariantCost string `json:"variantCost,omitempty"`
+
+	// SLO defines the Service Level Objectives for this variant.
+	// +kubebuilder:validation:Optional
+	SLO *ServiceLevelObjectives `json:"slo,omitempty"`
+}
+
+// ServiceLevelObjectives defines the performance targets for the model variant.
+type ServiceLevelObjectives struct {
+	// MaxITL is the maximum acceptable Inter-Token Latency in milliseconds.
+	// +kubebuilder:validation:Minimum=0
+	MaxITL *int32 `json:"maxITL,omitempty"`
+
+	// MaxTTFT is the maximum acceptable Time To First Token in milliseconds.
+	// +kubebuilder:validation:Minimum=0
+	MaxTTFT *int32 `json:"maxTTFT,omitempty"`
 }
 
 // ModelProfile provides resource and performance characteristics for the model variant.

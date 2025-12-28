@@ -118,16 +118,18 @@ func (cmc *SaturationMetricsCollector) CollectReplicaMetrics(
 	// Query KV cache and queue metrics in parallel for better performance
 	// Use result struct to avoid race conditions on error variables
 	type queryResult struct {
-		kvMetrics    map[string]float64
-		queueMetrics map[string]int
-		kvErr        error
-		queueErr     error
+		kvMetrics      map[string]float64
+		queueMetrics   map[string]int
+		latencyMetrics map[string]ReplicaLatencyMetrics
+		kvErr          error
+		queueErr       error
+		latencyErr     error
 	}
 	result := &queryResult{}
 	var resultMutex sync.Mutex
 	var wg sync.WaitGroup
 
-	wg.Add(2)
+	wg.Add(3)
 
 	// Query KV cache metrics in parallel
 	go func() {
@@ -149,6 +151,16 @@ func (cmc *SaturationMetricsCollector) CollectReplicaMetrics(
 		resultMutex.Unlock()
 	}()
 
+	// Query latency metrics in parallel
+	go func() {
+		defer wg.Done()
+		latency, err := cmc.queryLatencyMetrics(ctx, modelID, namespace)
+		resultMutex.Lock()
+		result.latencyMetrics = latency
+		result.latencyErr = err
+		resultMutex.Unlock()
+	}()
+
 	wg.Wait()
 
 	// Check for errors after both queries complete
@@ -158,13 +170,18 @@ func (cmc *SaturationMetricsCollector) CollectReplicaMetrics(
 	if result.queueErr != nil {
 		return nil, fmt.Errorf("failed to query queue metrics: %w", result.queueErr)
 	}
+	if result.latencyErr != nil {
+		// Log error but don't fail, latency metrics are optional for saturation engine
+		logger.Error(result.latencyErr, "Failed to query latency metrics", "modelID", modelID)
+	}
 
 	// Use results from struct
 	kvMetricsMap := result.kvMetrics
 	queueMetricsMap := result.queueMetrics
+	latencyMetricsMap := result.latencyMetrics
 
 	// Merge metrics by pod and assign to variants using deployment-to-pod mapping
-	replicaMetrics := cmc.mergeMetrics(ctx, kvMetricsMap, queueMetricsMap, modelID, namespace, deployments, variantAutoscalings, variantCosts)
+	replicaMetrics := cmc.mergeMetrics(ctx, kvMetricsMap, queueMetricsMap, latencyMetricsMap, modelID, namespace, deployments, variantAutoscalings, variantCosts)
 
 	logger.V(logging.DEBUG).Info("Collected replica metrics", "modelID", modelID, "namespace", namespace, "replicaCount", len(replicaMetrics))
 
@@ -285,10 +302,20 @@ func (cmc *SaturationMetricsCollector) queryQueueMetrics(
 //
 // This approach is more robust than pure name-based matching and aligns with
 // Kubernetes best practices for pod-to-controller attribution.
+// ReplicaLatencyMetrics holds latency-related metrics for a single replica
+type ReplicaLatencyMetrics struct {
+	ArrivalRate     float64
+	AvgInputTokens  float64
+	AvgOutputTokens float64
+	AvgITL          float64
+	AvgTTFT         float64
+}
+
 func (cmc *SaturationMetricsCollector) mergeMetrics(
 	ctx context.Context,
 	kvMetrics map[string]float64,
 	queueMetrics map[string]int,
+	latencyMetrics map[string]ReplicaLatencyMetrics,
 	modelID string,
 	namespace string,
 	deployments map[string]*appsv1.Deployment,
@@ -302,6 +329,9 @@ func (cmc *SaturationMetricsCollector) mergeMetrics(
 		podSet[pod] = true
 	}
 	for pod := range queueMetrics {
+		podSet[pod] = true
+	}
+	for pod := range latencyMetrics {
 		podSet[pod] = true
 	}
 
@@ -386,6 +416,9 @@ func (cmc *SaturationMetricsCollector) mergeMetrics(
 			}
 		}
 
+		// Get latency metrics
+		latency := latencyMetrics[podName] // zero value if not found
+
 		metric := interfaces.ReplicaMetrics{
 			PodName:         podName,
 			ModelID:         modelID,
@@ -395,6 +428,12 @@ func (cmc *SaturationMetricsCollector) mergeMetrics(
 			KvCacheUsage:    kvUsage,
 			QueueLength:     queueLen,
 			Cost:            cost,
+			// Latency fields
+			ArrivalRate:  latency.ArrivalRate,
+			AvgInputLen:  latency.AvgInputTokens,
+			AvgOutputLen: latency.AvgOutputTokens,
+			AvgITL:       latency.AvgITL,
+			AvgTTFT:      latency.AvgTTFT,
 		}
 
 		replicaMetrics = append(replicaMetrics, metric)
@@ -547,4 +586,124 @@ func (cmc *SaturationMetricsCollector) getExistingPods(
 	}
 
 	return existingPods
+}
+
+// queryLatencyMetrics queries all latency-related metrics grouped by pod.
+func (cmc *SaturationMetricsCollector) queryLatencyMetrics(
+	ctx context.Context,
+	modelID string,
+	namespace string,
+) (map[string]ReplicaLatencyMetrics, error) {
+	logger := ctrl.LoggerFrom(ctx)
+
+	// Helper to build per-pod query
+	buildQuery := func(metricSum, metricCount string, isRate bool) string {
+		// rate(sum[1m]) / rate(count[1m]) grouped by pod
+		// For arrival rate: rate(count[1m])
+		encodedNS := escapePrometheusLabelValue(namespace)
+		encodedModel := escapePrometheusLabelValue(modelID)
+
+		if !isRate {
+			// Ratio query (e.g. ITL, TTFT, Length)
+			return fmt.Sprintf(`sum by (pod) (rate(%s{namespace="%s",model_name="%s"}[1m])) / sum by (pod) (rate(%s{namespace="%s",model_name="%s"}[1m]))`,
+				metricSum, encodedNS, encodedModel,
+				metricCount, encodedNS, encodedModel)
+		} else {
+			// Rate query (Arrival)
+			return fmt.Sprintf(`sum by (pod) (rate(%s{namespace="%s",model_name="%s"}[1m]))`,
+				metricSum, encodedNS, encodedModel) // metricSum is actually the count metric here
+		}
+	}
+
+	// 1. Arrival Rate
+	qArrival := buildQuery(constants.VLLMRequestSuccessTotal, "", true)
+	// 2. Input Tokens
+	qInput := buildQuery(constants.VLLMRequestPromptTokensSum, constants.VLLMRequestPromptTokensCount, false)
+	// 3. Output Tokens
+	qOutput := buildQuery(constants.VLLMRequestGenerationTokensSum, constants.VLLMRequestGenerationTokensCount, false)
+	// 4. ITL (Seconds)
+	qITL := buildQuery(constants.VLLMTimePerOutputTokenSecondsSum, constants.VLLMTimePerOutputTokenSecondsCount, false)
+	// 5. TTFT (Seconds)
+	qTTFT := buildQuery(constants.VLLMTimeToFirstTokenSecondsSum, constants.VLLMTimeToFirstTokenSecondsCount, false)
+
+	// Execute in parallel
+	type result struct {
+		name string
+		data map[string]float64
+		err  error
+	}
+	results := make(chan result, 5)
+	var wg sync.WaitGroup
+
+	runQuery := func(name, query string) {
+		defer wg.Done()
+		// timeout per query
+		qCtx, cancel := contextWithRespectedDeadline(ctx, 5*time.Second)
+		defer cancel()
+
+		val, _, err := utils.QueryPrometheusWithBackoff(qCtx, cmc.promAPI, query)
+		if err != nil {
+			results <- result{name: name, err: err}
+			return
+		}
+
+		m := make(map[string]float64)
+		if val.Type() == model.ValVector {
+			for _, sample := range val.(model.Vector) {
+				pod := string(sample.Metric["pod"])
+				if pod == "" {
+					pod = string(sample.Metric["pod_name"])
+				}
+				if pod != "" {
+					m[pod] = float64(sample.Value)
+				}
+			}
+		}
+		results <- result{name: name, data: m}
+	}
+
+	wg.Add(5)
+	go runQuery("arrival", qArrival)
+	go runQuery("input", qInput)
+	go runQuery("output", qOutput)
+	go runQuery("itl", qITL)
+	go runQuery("ttft", qTTFT)
+
+	wg.Wait()
+	close(results)
+
+	// Aggregate
+	metrics := make(map[string]ReplicaLatencyMetrics)
+	var errs []string
+
+	for res := range results {
+		if res.err != nil {
+			errs = append(errs, fmt.Sprintf("%s: %v", res.name, res.err))
+			continue
+		}
+
+		for pod, val := range res.data {
+			m := metrics[pod]
+			switch res.name {
+			case "arrival":
+				m.ArrivalRate = val * 60 // per minute
+			case "input":
+				m.AvgInputTokens = val
+			case "output":
+				m.AvgOutputTokens = val
+			case "itl":
+				m.AvgITL = val * 1000 // ms
+			case "ttft":
+				m.AvgTTFT = val * 1000 // ms
+			}
+			metrics[pod] = m
+		}
+	}
+
+	if len(errs) > 0 {
+		logger.Info("Errors querying per-pod latency metrics", "errors", strings.Join(errs, "; "))
+		// Return partial results
+	}
+
+	return metrics, nil
 }

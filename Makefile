@@ -153,6 +153,16 @@ test-e2e: manifests generate fmt vet ## Run the e2e tests. Expected an isolated 
 	$(eval SKIP_ARGS := $(if $(SKIP),-ginkgo.skip="$(SKIP)",))
 	export KUBECONFIG=$(KUBECONFIG) K8S_EXPECTED_VERSION=$(K8S_VERSION) && go test ./test/e2e-saturation-based/ -timeout 30m -v -ginkgo.v $(FOCUS_ARGS) $(SKIP_ARGS)
 
+.PHONY: test-e2e-predictive
+test-e2e-predictive: manifests generate fmt vet setup-envtest ## Run the predictive engine e2e tests.
+	@command -v $(KIND) >/dev/null 2>&1 || { \
+		echo "Kind is not installed. Please install Kind manually."; \
+		exit 1; \
+	}
+	$(eval FOCUS_ARGS := $(if $(FOCUS),-ginkgo.focus="$(FOCUS)",-ginkgo.focus="Predictive Engine"))
+	$(eval SKIP_ARGS := $(if $(SKIP),-ginkgo.skip="$(SKIP)",))
+	export KUBECONFIG=$(KUBECONFIG) K8S_EXPECTED_VERSION=$(K8S_VERSION) && go test ./test/e2e-predictive/ -timeout 30m -v -ginkgo.v $(FOCUS_ARGS) $(SKIP_ARGS)
+
 # E2E tests on OpenShift cluster
 # Supports KUBECONFIG or in-cluster authentication (for self-hosted runners).
 .PHONY: test-e2e-openshift

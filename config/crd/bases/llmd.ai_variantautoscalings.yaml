@@ -151,6 +151,22 @@ spec:
                 - name
                 type: object
                 x-kubernetes-map-type: atomic
+              slo:
+                description: SLO defines the Service Level Objectives for this variant.
+                properties:
+                  maxITL:
+                    description: MaxITL is the maximum acceptable Inter-Token Latency
+                      in milliseconds.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  maxTTFT:
+                    description: MaxTTFT is the maximum acceptable Time To First Token
+                      in milliseconds.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                type: object
               variantCost:
                 default: "10.0"
                 description: VariantCost specifies the cost per replica for this variant
