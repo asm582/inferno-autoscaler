@@ -64,6 +64,7 @@ spec:
           - --leader-elect=true
           - --health-probe-bind-address=:8081
           - --watch-namespace=$(POD_NAMESPACE)
+          - --latency-predictor-url=http://vllm-llama3-8b-instruct-epp.default.svc.cluster.local:8001
           # Leader election timeout configuration (optional - defaults shown below)
           # Uncomment and adjust these values if you need to tune for your environment:
           # - --leader-election-lease-duration=60s
@@ -76,15 +77,17 @@ spec:
           - name: LOG_LEVEL
             value: "debug"  # or "info", "warn", "error"
           - name: PROMETHEUS_BASE_URL
-            valueFrom:
-              configMapKeyRef:
-                name: variantautoscaling-config
-                key: PROMETHEUS_BASE_URL
+            value: "http://kube-prometheus-stack-prometheus.workload-variant-autoscaler-monitoring:9090"
+          #   valueFrom:
+          #     configMapKeyRef:
+          #       name: variantautoscaling-config
+          #       key: PROMETHEUS_BASE_URL
           - name: PROMETHEUS_TLS_INSECURE_SKIP_VERIFY
-            valueFrom:
-              configMapKeyRef:
-                name: variantautoscaling-config
-                key: PROMETHEUS_TLS_INSECURE_SKIP_VERIFY
+            value: "true"
+          #   valueFrom:
+          #     configMapKeyRef:
+          #       name: variantautoscaling-config
+          #       key: PROMETHEUS_TLS_INSECURE_SKIP_VERIFY
           - name: PROMETHEUS_TOKEN_PATH
             value: "/var/run/secrets/kubernetes.io/serviceaccount/token"
           - name: WVA_SCALE_TO_ZERO

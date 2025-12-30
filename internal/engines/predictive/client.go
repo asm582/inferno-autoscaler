@@ -54,12 +54,17 @@ type HTTPLatencyPredictorClient struct {
 }
 
 type PredictionRequest struct {
-	ModelID  string             `json:"model_id"`
-	Features map[string]float64 `json:"features"`
+	KvCachePercentage  float64 `json:"kv_cache_percentage"`
+	InputTokenLength   int     `json:"input_token_length"`
+	NumRequestWaiting  int     `json:"num_request_waiting"`
+	NumRequestRunning  int     `json:"num_request_running"`
+	NumTokensGenerated int     `json:"num_tokens_generated"`
+	PrefixCacheScore   float64 `json:"prefix_cache_score"`
 }
 
 type PredictionResponse struct {
-	Prediction float64 `json:"prediction"`
+	TtftMs float64 `json:"ttft_ms"`
+	TpotMs float64 `json:"tpot_ms"`
 }
 
 func NewHTTPLatencyPredictorClient(baseURL string) *HTTPLatencyPredictorClient {
@@ -71,45 +76,60 @@ func NewHTTPLatencyPredictorClient(baseURL string) *HTTPLatencyPredictorClient {
 	}
 }
 
-func (c *HTTPLatencyPredictorClient) predict(ctx context.Context, endpoint string, modelID string, features map[string]float64) (float64, error) {
+func (c *HTTPLatencyPredictorClient) predict(ctx context.Context, endpoint string, features map[string]float64) (*PredictionResponse, error) {
 	reqBody := PredictionRequest{
-		ModelID:  modelID,
-		Features: features,
+		KvCachePercentage:  features["kv_cache_percentage"],
+		InputTokenLength:   int(features["input_token_length"]),
+		NumRequestWaiting:  int(features["num_request_waiting"]),
+		NumRequestRunning:  int(features["num_request_running"]),
+		NumTokensGenerated: int(features["num_tokens_generated"]),
+		PrefixCacheScore:   features["prefix_cache_score"],
 	}
 	jsonData, err := json.Marshal(reqBody)
 	if err != nil {
-		return 0, fmt.Errorf("failed to marshal request: %w", err)
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
 	}
 
 	url := fmt.Sprintf("%s%s", c.BaseURL, endpoint)
 	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(jsonData))
 	if err != nil {
-		return 0, fmt.Errorf("failed to create request: %w", err)
+		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := c.Client.Do(req)
 	if err != nil {
-		return 0, fmt.Errorf("failed to send request: %w", err)
+		return nil, fmt.Errorf("failed to send request: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return 0, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+		return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
 	}
 
 	var respBody PredictionResponse
 	if err := json.NewDecoder(resp.Body).Decode(&respBody); err != nil {
-		return 0, fmt.Errorf("failed to decode response: %w", err)
+		return nil, fmt.Errorf("failed to decode response: %w", err)
 	}
 
-	return respBody.Prediction, nil
+	return &respBody, nil
 }
 
 func (c *HTTPLatencyPredictorClient) PredictITL(ctx context.Context, modelID string, features map[string]float64) (float64, error) {
-	return c.predict(ctx, "/predict/itl", modelID, features)
+	// EPP server seems to ignore ModelID in URL for single prediction, or expects it implied by service?
+	// But OpenAPI showed /predict.
+	// We call /predict.
+	resp, err := c.predict(ctx, "/predict", features)
+	if err != nil {
+		return 0, err
+	}
+	return resp.TpotMs, nil
 }
 
 func (c *HTTPLatencyPredictorClient) PredictTTFT(ctx context.Context, modelID string, features map[string]float64) (float64, error) {
-	return c.predict(ctx, "/predict/ttft", modelID, features)
+	resp, err := c.predict(ctx, "/predict", features)
+	if err != nil {
+		return 0, err
+	}
+	return resp.TtftMs, nil
 }

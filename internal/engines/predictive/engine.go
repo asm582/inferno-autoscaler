@@ -18,6 +18,7 @@ package predictive
 
 import (
 	"context"
+	"math"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -119,7 +120,7 @@ func (e *Engine) optimize(ctx context.Context) error {
 			cost := 1.0
 
 			// Validate metrics availability
-			metricValidation := e.MetricsCollector.ValidateMetricsAvailability(ctx, modelID, va.Namespace)
+			metricValidation := e.MetricsCollector.ValidateMetricsAvailability(ctx, va.Spec.ModelID, va.Namespace)
 			if !metricValidation.Available {
 				logger.Info("Metrics not available yet", "va", va.Name)
 				continue
@@ -136,7 +137,7 @@ func (e *Engine) optimize(ctx context.Context) error {
 
 			// Per-Replica Prediction Logic
 			// Fetch ALL replica metrics for this model (potentially multiple VAs)
-			replicaMetrics, err := e.MetricsCollector.CollectReplicaMetrics(ctx, modelID, va.Namespace,
+			replicaMetrics, err := e.MetricsCollector.CollectReplicaMetrics(ctx, va.Spec.ModelID, va.Namespace,
 				map[string]*appsv1.Deployment{deploy.Name: &deploy},
 				map[string]*llmdVariantAutoscalingV1alpha1.VariantAutoscaling{va.Name: &va},
 				map[string]float64{va.Name: cost})
@@ -161,22 +162,31 @@ func (e *Engine) optimize(ctx context.Context) error {
 				// For simplicity in this engine, if ModdelID matches, and it's E2E, we consider it.
 				// But ideally checks rep.VariantName == va.Name
 				// Assuming Mock collector returns correct ModelID/Namespace
-				if rep.ModelID != modelID || rep.Namespace != va.Namespace {
+				if rep.ModelID != va.Spec.ModelID || rep.Namespace != va.Namespace {
 					continue
 				}
 				replicaCount++
 
 				// Construct Features for THIS replica
 				features := map[string]float64{
-					"arrival_rate":   rep.ArrivalRate,
-					"kv_cache_usage": rep.KvCacheUsage, // or use mock value if 0
-					"input_length":   rep.AvgInputLen,
+					"kv_cache_percentage":  rep.KvCacheUsage,
+					"input_token_length":   rep.AvgInputLen,
+					"num_request_waiting":  float64(rep.QueueLength),
+					"num_request_running":  rep.RequestsRunning,
+					"num_tokens_generated": rep.TokensGenerated,
+					"prefix_cache_score":   rep.PrefixCacheScore,
+				}
+
+				// Sanitize NaN values
+				for k, v := range features {
+					if math.IsNaN(v) {
+						features[k] = 0
+					}
 				}
 
 				// If inputs are 0 (e.g. no traffic), use defaults to avoid garbage predictions?
-				// Or let predictor handle it.
-				if features["input_length"] == 0 {
-					features["input_length"] = 128
+				if features["input_token_length"] == 0 {
+					features["input_token_length"] = 128
 				}
 
 				pred, err := e.PredictorClient.PredictITL(ctx, modelID, features)
@@ -196,20 +206,25 @@ func (e *Engine) optimize(ctx context.Context) error {
 				"target_itl", targetITL)
 
 			// DECISION LOGIC
-			currentReplicas := int(*deploy.Spec.Replicas) // active replicas
-			desiredReplicas := currentReplicas
+			// Use the LAST calculated desired state as the baseline, if valid.
+			// This decouples us from HPA/Deployment lag (stabilization windows).
+			baselineReplicas := int(*deploy.Spec.Replicas)
+			if va.Status.DesiredOptimizedAlloc.NumReplicas > 0 {
+				baselineReplicas = va.Status.DesiredOptimizedAlloc.NumReplicas
+			}
+			desiredReplicas := baselineReplicas
 
 			if maxPredictedITL > targetITL {
 				// Scale Up if worst replica is violating SLO
-				desiredReplicas = currentReplicas + 1
-				logger.Info("Scaling UP", "reason", "Replica SLO violation", "current", currentReplicas, "desired", desiredReplicas, "max_pred_itl", maxPredictedITL)
-			} else if maxPredictedITL < targetITL*0.5 && currentReplicas > 1 {
+				desiredReplicas = baselineReplicas + 1
+				logger.Info("Scaling UP", "reason", "Replica SLO violation", "baseline", baselineReplicas, "desired", desiredReplicas, "max_pred_itl", maxPredictedITL)
+			} else if maxPredictedITL < targetITL*0.5 && baselineReplicas > 1 {
 				// Scale Down if max latency is very safe
-				desiredReplicas = currentReplicas - 1
-				logger.Info("Scaling DOWN", "reason", "Global slack", "current", currentReplicas, "desired", desiredReplicas)
+				desiredReplicas = baselineReplicas - 1
+				logger.Info("Scaling DOWN", "reason", "Global slack", "baseline", baselineReplicas, "desired", desiredReplicas)
 			} else {
 				// Keep same
-				logger.Info("Maintaining replicas", "current", currentReplicas, "max_predicted_itl", maxPredictedITL)
+				logger.Info("Maintaining replicas", "baseline", baselineReplicas, "max_predicted_itl", maxPredictedITL)
 			}
 
 			if desiredReplicas < 1 {

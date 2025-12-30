@@ -304,11 +304,14 @@ func (cmc *SaturationMetricsCollector) queryQueueMetrics(
 // Kubernetes best practices for pod-to-controller attribution.
 // ReplicaLatencyMetrics holds latency-related metrics for a single replica
 type ReplicaLatencyMetrics struct {
-	ArrivalRate     float64
-	AvgInputTokens  float64
-	AvgOutputTokens float64
-	AvgITL          float64
-	AvgTTFT         float64
+	ArrivalRate         float64
+	AvgInputTokens      float64
+	AvgOutputTokens     float64
+	AvgITL              float64
+	AvgTTFT             float64
+	RequestsRunning     float64
+	TokensGeneratedRate float64
+	PrefixCacheHitRate  float64
 }
 
 func (cmc *SaturationMetricsCollector) mergeMetrics(
@@ -429,11 +432,14 @@ func (cmc *SaturationMetricsCollector) mergeMetrics(
 			QueueLength:     queueLen,
 			Cost:            cost,
 			// Latency fields
-			ArrivalRate:  latency.ArrivalRate,
-			AvgInputLen:  latency.AvgInputTokens,
-			AvgOutputLen: latency.AvgOutputTokens,
-			AvgITL:       latency.AvgITL,
-			AvgTTFT:      latency.AvgTTFT,
+			ArrivalRate:      latency.ArrivalRate,
+			AvgInputLen:      latency.AvgInputTokens,
+			AvgOutputLen:     latency.AvgOutputTokens,
+			AvgITL:           latency.AvgITL,
+			AvgTTFT:          latency.AvgTTFT,
+			RequestsRunning:  latency.RequestsRunning,
+			TokensGenerated:  latency.TokensGeneratedRate,
+			PrefixCacheScore: latency.PrefixCacheHitRate,
 		}
 
 		replicaMetrics = append(replicaMetrics, metric)
@@ -594,8 +600,7 @@ func (cmc *SaturationMetricsCollector) queryLatencyMetrics(
 	modelID string,
 	namespace string,
 ) (map[string]ReplicaLatencyMetrics, error) {
-	logger := ctrl.LoggerFrom(ctx)
-
+	// match existing
 	// Helper to build per-pod query
 	buildQuery := func(metricSum, metricCount string, isRate bool) string {
 		// rate(sum[1m]) / rate(count[1m]) grouped by pod
@@ -615,6 +620,13 @@ func (cmc *SaturationMetricsCollector) queryLatencyMetrics(
 		}
 	}
 
+	buildGaugeQuery := func(metric string) string {
+		encodedNS := escapePrometheusLabelValue(namespace)
+		encodedModel := escapePrometheusLabelValue(modelID)
+		return fmt.Sprintf(`avg by (pod) (avg_over_time(%s{namespace="%s",model_name="%s"}[1m]))`,
+			metric, encodedNS, encodedModel)
+	}
+
 	// 1. Arrival Rate
 	qArrival := buildQuery(constants.VLLMRequestSuccessTotal, "", true)
 	// 2. Input Tokens
@@ -625,6 +637,12 @@ func (cmc *SaturationMetricsCollector) queryLatencyMetrics(
 	qITL := buildQuery(constants.VLLMTimePerOutputTokenSecondsSum, constants.VLLMTimePerOutputTokenSecondsCount, false)
 	// 5. TTFT (Seconds)
 	qTTFT := buildQuery(constants.VLLMTimeToFirstTokenSecondsSum, constants.VLLMTimeToFirstTokenSecondsCount, false)
+	// 6. Requests Running (Gauge)
+	qRunning := buildGaugeQuery(constants.VLLMNumRequestRunning)
+	// 7. Tokens Generated Rate (Rate of Sum) - Use buildQuery with isRate=true
+	qTokensGen := buildQuery(constants.VLLMRequestGenerationTokensSum, "", true)
+	// 8. Prefix Cache Hit Rate (Gauge)
+	qPrefixCache := buildGaugeQuery(constants.VLLMPrefixCacheHitRate)
 
 	// Execute in parallel
 	type result struct {
@@ -632,7 +650,7 @@ func (cmc *SaturationMetricsCollector) queryLatencyMetrics(
 		data map[string]float64
 		err  error
 	}
-	results := make(chan result, 5)
+	results := make(chan result, 8)
 	var wg sync.WaitGroup
 
 	runQuery := func(name, query string) {
@@ -662,12 +680,15 @@ func (cmc *SaturationMetricsCollector) queryLatencyMetrics(
 		results <- result{name: name, data: m}
 	}
 
-	wg.Add(5)
+	wg.Add(8)
 	go runQuery("arrival", qArrival)
 	go runQuery("input", qInput)
 	go runQuery("output", qOutput)
 	go runQuery("itl", qITL)
 	go runQuery("ttft", qTTFT)
+	go runQuery("running", qRunning)
+	go runQuery("tokens", qTokensGen)
+	go runQuery("prefix", qPrefixCache)
 
 	wg.Wait()
 	close(results)
@@ -675,11 +696,14 @@ func (cmc *SaturationMetricsCollector) queryLatencyMetrics(
 	// Aggregate
 	metrics := make(map[string]ReplicaLatencyMetrics)
 	var errs []string
+	logger := ctrl.LoggerFrom(ctx)
 
 	for res := range results {
 		if res.err != nil {
+			// Log error but continue
 			errs = append(errs, fmt.Sprintf("%s: %v", res.name, res.err))
-			continue
+			// Special handling: if prefix cache metric missing (e.g. older vLLM), don't fail, just returning 0 is fine.
+			continue 
 		}
 
 		for pod, val := range res.data {
@@ -695,6 +719,12 @@ func (cmc *SaturationMetricsCollector) queryLatencyMetrics(
 				m.AvgITL = val * 1000 // ms
 			case "ttft":
 				m.AvgTTFT = val * 1000 // ms
+			case "running":
+				m.RequestsRunning = val
+			case "tokens":
+				m.TokensGeneratedRate = val
+			case "prefix":
+				m.PrefixCacheHitRate = val
 			}
 			metrics[pod] = m
 		}
@@ -702,7 +732,6 @@ func (cmc *SaturationMetricsCollector) queryLatencyMetrics(
 
 	if len(errs) > 0 {
 		logger.Info("Errors querying per-pod latency metrics", "errors", strings.Join(errs, "; "))
-		// Return partial results
 	}
 
 	return metrics, nil

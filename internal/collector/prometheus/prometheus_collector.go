@@ -220,6 +220,7 @@ func (pc *PrometheusCollector) ValidateMetricsAvailability(
 	// Query for basic vLLM metric to validate scraping is working
 	// Try with namespace label first (real vLLM), fall back to just model_name (vllme emulator)
 	testQuery := fmt.Sprintf(`%s{model_name="%s",namespace="%s"}`, constants.VLLMNumRequestRunning, modelName, namespace)
+	logger.Info("Validating metrics availability", "query", testQuery)
 
 	val, _, err := utils.QueryPrometheusWithBackoff(ctx, pc.promAPI, testQuery)
 	if err != nil {

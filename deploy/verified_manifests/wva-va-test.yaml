@@ -1,0 +1,26 @@
+apiVersion: llmd.ai/v1alpha1
+kind: VariantAutoscaling
+metadata:
+  name: test-va
+  namespace: default
+  labels:
+    inference.optimization/acceleratorName: A100
+spec:
+  scaleTargetRef:
+    kind: Deployment
+    name: vllm-llama3-8b-instruct
+  modelID: "Qwen/Qwen2.5-0.5B-Instruct"
+  modelProfile:
+    accelerators:
+      - acc: "A100"
+        accCount: 1
+        perfParms:
+          decodeParms:
+            alpha: "20.5"
+            beta: "0.41"
+          prefillParms:
+            gamma: "5.2"
+            delta: "0.1"
+        maxBatchSize: 256
+  slo:
+    maxITL: 100

@@ -54,12 +54,13 @@ spec:
         args:
           - --leader-elect=true
           - --health-probe-bind-address=:8081
-          {{- if .Values.wva.namespaceScoped }}
-          - --watch-namespace=$(POD_NAMESPACE)
-          {{- end }}
+
           {{- if .Values.wva.metrics.enabled }}
           - --metrics-bind-address=:{{ .Values.wva.metrics.port }}
           - --metrics-secure={{ .Values.wva.metrics.secure }}
+          {{- end }}
+          {{- if .Values.latencyPredictorURL }}
+          - --latency-predictor-url={{ .Values.latencyPredictorURL }}
           {{- end }}
         image: "{{ .Values.wva.image.repository }}:{{ .Values.wva.image.tag }}"
         imagePullPolicy: "{{ .Values.wva.imagePullPolicy }}"

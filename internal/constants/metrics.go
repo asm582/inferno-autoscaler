@@ -47,11 +47,14 @@ const (
 
 	// VLLMKvCacheUsagePerc tracks the KV cache utilization as a percentage (0.0-1.0).
 	// Used by saturation analyzer to detect KV cache saturation and prevent OOM errors.
-	VLLMKvCacheUsagePerc = "vllm:kv_cache_usage_perc"
+	VLLMKvCacheUsagePerc = "vllm:gpu_cache_usage_perc"
 
 	// VLLMNumRequestsWaiting tracks the number of requests waiting in the queue.
 	// Used by saturation analyzer to detect request queue saturation.
 	VLLMNumRequestsWaiting = "vllm:num_requests_waiting"
+
+	// VLLMPrefixCacheHitRate tracks the prefix cache hit rate (0.0-1.0).
+	VLLMPrefixCacheHitRate = "vllm:request_prefix_cache_hit_rate"
 )
 
 // Inferno Output Metrics

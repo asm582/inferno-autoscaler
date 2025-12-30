@@ -19,7 +19,7 @@ wva:
   
   # If true, the controller will only watch the namespace it is deployed in.
   # If false, the controller will watch all namespaces (cluster-scoped).
-  namespaceScoped: true
+  namespaceScoped: false
 
   reconcileInterval: 60s
     
@@ -88,7 +88,9 @@ hpa:
   targetAverageValue: "1"
 
 vllmService:
-  enabled: true
+  enabled: false
   nodePort: 30000
   interval: 15s
   scheme: http  # vLLM emulator runs on HTTP
+
+latencyPredictorURL: "http://vllm-llama3-8b-instruct-epp.default.svc.cluster.local:8001"

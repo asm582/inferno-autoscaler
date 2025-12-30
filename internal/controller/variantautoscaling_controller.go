@@ -45,6 +45,7 @@ import (
 	"github.com/llm-d-incubation/workload-variant-autoscaler/internal/logging"
 	"github.com/llm-d-incubation/workload-variant-autoscaler/internal/saturation"
 	"github.com/llm-d-incubation/workload-variant-autoscaler/internal/utils"
+	"github.com/llm-d-incubation/workload-variant-autoscaler/internal/actuator"
 )
 
 // VariantAutoscalingReconciler reconciles a variantAutoscaling object
@@ -62,6 +63,9 @@ type VariantAutoscalingReconciler struct {
 	// MetricsCollector is the interface for collecting metrics from various backends
 	// Defaults to Prometheus collector, but can be swapped for other backends (e.g., EPP)
 	MetricsCollector interfaces.MetricsCollector
+
+	// Actuator handles external actions like metric emission
+	Actuator *actuator.Actuator
 
 	// Saturation scaling config cache (thread-safe, updated on ConfigMap changes)
 }
@@ -203,6 +207,12 @@ func (r *VariantAutoscalingReconciler) Reconcile(ctx context.Context, req ctrl.R
 		va.Status.DesiredOptimizedAlloc.LastRunTime = lastRunTime
 	}
 
+	// Ensure Accelerator is not empty to pass CRD validation (MinLength=2)
+	// This handles cases where no decision is available yet or decision has empty accelerator
+	if va.Status.DesiredOptimizedAlloc.Accelerator == "" {
+		va.Status.DesiredOptimizedAlloc.Accelerator = "Pending"
+	}
+
 	// Update Status if we have changes (Conditions or OptimizedAlloc)
 	// We use Patch to only send changed fields, avoiding validation errors on unchanged fields
 	if err := r.Status().Patch(ctx, &va, client.MergeFrom(originalVA)); err != nil {
@@ -211,7 +221,16 @@ func (r *VariantAutoscalingReconciler) Reconcile(ctx context.Context, req ctrl.R
 		return ctrl.Result{}, err
 	}
 
-	// END: Per VA logic
+
+
+	// Emit metrics for HPA/Autoscaling
+	// This ensures the custom metrics used by HPA are up-to-date with the latest decision
+	if r.Actuator != nil {
+		if err := r.Actuator.EmitMetrics(ctx, &va); err != nil {
+			logger.Error(err, "Failed to emit metrics", "variant", va.Name)
+			// Non-blocking error, continue
+		}
+	}
 
 	// Push updated VA to Engine cache
 	common.UpdateVACache(&va)
@@ -510,7 +529,9 @@ func (r *VariantAutoscalingReconciler) SetupWithManager(mgr ctrl.Manager) error 
 					// Return empty request to trigger reconcile for all VAs if needed?
 					// Changing global interval affects Engine loop, but not necessarily individual VAs immediately.
 					// Engine loop reads new interval on next tick.
-					return []reconcile.Request{{}}
+					// Config update is handled above by updating common.Config.
+					// No need to trigger reconciliation of specific VAs as the Engine loop handles the logic.
+					return nil
 				} else if name == getSaturationConfigMapName() {
 					// Saturation Scaling Config
 					configs := make(map[string]interfaces.SaturationScalingConfig)
@@ -534,7 +555,8 @@ func (r *VariantAutoscalingReconciler) SetupWithManager(mgr ctrl.Manager) error 
 
 					// Return empty request (or requests for all VAs) to trigger reconciliation?
 					// Like optimization interval, the Engine picks this up.
-					return []reconcile.Request{{}}
+					// Config update is handled above.
+					return nil
 				}
 
 				return nil

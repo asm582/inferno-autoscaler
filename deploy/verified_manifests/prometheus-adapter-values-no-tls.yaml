@@ -1,0 +1,21 @@
+prometheus:
+  url: http://kube-prometheus-stack-prometheus.workload-variant-autoscaler-monitoring.svc.cluster.local
+  port: 9090
+
+rules:
+  external:
+  - seriesQuery: 'inferno_desired_replicas'
+    resources:
+      overrides:
+        namespace: {resource: "namespace"}
+        variant_name: {resource: "deployment"}  
+    name:
+      matches: "^inferno_desired_replicas"
+      as: "inferno_desired_replicas"
+    metricsQuery: 'inferno_desired_replicas{<<.LabelMatchers>>}'
+
+replicas: 1
+logLevel: 4
+
+tls:
+  enable: false

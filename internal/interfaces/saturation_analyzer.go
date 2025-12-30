@@ -26,6 +26,11 @@ type ReplicaMetrics struct {
 	AvgOutputLen float64 // Tokens
 	AvgITL       float64 // ms
 	AvgTTFT      float64 // ms
+
+	// EPP fields
+	RequestsRunning  float64 // Number of requests running
+	TokensGenerated  float64 // Total tokens generated
+	PrefixCacheScore float64 // Prefix cache hit rate (0.0-1.0)
 }
 
 // ReplicaMetricsMetadata contains freshness information for replica metrics
