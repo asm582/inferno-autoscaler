@@ -353,15 +353,36 @@ func (a *Analyzer) CalculateSaturationTargets(
 	}
 
 	// Check if we should preserve any desired replicas
-	// If desired ≠ 0 and desired ≠ current, preserve desired
+	// Check if we should preserve any desired replicas
+	// Rules for preservation:
+	// 1. If desired ≠ 0 and desired ≠ current: preserve desired (already transitioning)
+	// 2. If metrics count < current replicas: preserve current (waiting for metrics from new pods)
 	preservedVariants := make(map[string]bool)
 	for _, va := range saturationAnalysis.VariantAnalyses {
 		state := stateMap[va.VariantName]
+
+		// Case 1: Transitioning state
 		if state.DesiredReplicas != 0 && state.DesiredReplicas != state.CurrentReplicas {
 			targets[va.VariantName] = state.DesiredReplicas
 			preservedVariants[va.VariantName] = true
-			ctrl.LoggerFrom(ctx).V(logging.DEBUG).Info("Preserving desired replicas",
+			ctrl.LoggerFrom(ctx).V(logging.DEBUG).Info("Preserving desired replicas (transitioning)",
 				"variant", va.VariantName, "currentReplicas", state.CurrentReplicas, "readyReplicas", va.ReplicaCount, "desired", state.DesiredReplicas)
+			continue
+		}
+
+		// Case 2: Incomplete metrics or Unready pods (Scale-up ramp)
+		// If we have fewer metrics than current replicas, OR fewer ready replicas than current,
+		// we shouldn't make new decisions based on partial view.
+		// This handles the race where Deployment is updated but Prometheus hasn't scraped new pods yet,
+		// or K8s hasn't marked pods as Ready yet.
+		logger := ctrl.LoggerFrom(ctx)
+		logger.Info("Analyzer Check", "variant", va.VariantName, "metricsCount", va.ReplicaCount, "currentReplicas", state.CurrentReplicas, "readyReplicas", state.ReadyReplicas)
+
+		if va.ReplicaCount < state.CurrentReplicas || state.ReadyReplicas < state.CurrentReplicas {
+			targets[va.VariantName] = state.CurrentReplicas
+			preservedVariants[va.VariantName] = true
+			logger.Info("Preserving current replicas (unstable state)",
+				"variant", va.VariantName, "currentReplicas", state.CurrentReplicas, "readyReplicas", state.ReadyReplicas, "metricsCount", va.ReplicaCount)
 		}
 	}
 

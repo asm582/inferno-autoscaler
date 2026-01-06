@@ -248,6 +248,7 @@ func (e *Engine) BuildVariantStates(
 		states = append(states, interfaces.VariantReplicaState{
 			VariantName:     deploy.Name,
 			CurrentReplicas: currentReplicas,
+			ReadyReplicas:   int(deploy.Status.ReadyReplicas), // Capture ready replicas for stabilization checks
 			DesiredReplicas: va.Status.DesiredOptimizedAlloc.NumReplicas,
 		})
 	}

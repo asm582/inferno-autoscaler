@@ -99,6 +99,7 @@ const (
 type VariantReplicaState struct {
 	VariantName     string
 	CurrentReplicas int
+	ReadyReplicas   int // From Deployment Status, used for stabilization
 	DesiredReplicas int // From optimizer/CRD status, 0 if not set
 }
 

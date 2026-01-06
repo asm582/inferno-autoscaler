@@ -485,12 +485,10 @@ func (cmc *SaturationMetricsCollector) findDeploymentForPod(
 	return matchedDeployment
 }
 
-// getExistingPods filters candidate pods using Prometheus kube_pod_info metric.
-// Queries for the current state from kube-state-metrics using deployment name filtering
+// getExistingPods filters candidate pods using the Kubernetes API or Prometheus kube_pod_info metric.
+// Matches pods to deployments using label selectors.
 //
-// TODO(note): this approach may still be subject to staleness, as the scrape interval (typically 15-30s)
-// adds latency between pod termination and metric removal
-// Returns a map of pod names that have current metrics in Prometheus.
+// Returns a map of pod names that currently exist.
 func (cmc *SaturationMetricsCollector) getExistingPods(
 	ctx context.Context,
 	namespace string,
@@ -500,6 +498,47 @@ func (cmc *SaturationMetricsCollector) getExistingPods(
 	logger := ctrl.LoggerFrom(ctx)
 	existingPods := make(map[string]bool)
 
+	// Strategy 1: Use Kubernetes API (preferred)
+	// This avoids "stale pod" issues where Prometheus returns metrics for terminated pods
+	// that haven't been scraped out yet.
+	if cmc.k8sClient != nil {
+		for _, deployment := range deployments {
+			// Use deployment's label selector to find its pods
+			selector, err := metav1.LabelSelectorAsSelector(deployment.Spec.Selector)
+			if err != nil {
+				logger.Info("Invalid label selector for deployment", "error", err)
+				continue
+			}
+
+			// List pods matching this deployment's selector
+			podList := &corev1.PodList{}
+			listOpts := &client.ListOptions{
+				Namespace:     namespace,
+				LabelSelector: selector,
+			}
+
+			if err := cmc.k8sClient.List(ctx, podList, listOpts); err != nil {
+				logger.Error(err, "Failed to list pods for verification", "namespace", namespace)
+				continue
+			}
+
+			// Add found pods to existingPods set if they are candidates
+			for _, pod := range podList.Items {
+				if candidatePods[pod.Name] {
+					existingPods[pod.Name] = true
+				}
+			}
+		}
+
+		logger.V(logging.DEBUG).Info("Verified pod existence via K8s API",
+			"candidates", len(candidatePods),
+			"verified", len(existingPods))
+
+		return existingPods
+	}
+
+	// Strategy 2: Fallback to Prometheus kube_pod_info
+	//
 	// Build pod name regex filter from deployment names (pod=~"deployment1-.*|deployment2-.*|deployment3-.*")
 	// To reduce the query scope
 	var podQueryFilter string

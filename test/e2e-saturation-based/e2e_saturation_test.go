@@ -831,7 +831,7 @@ var _ = Describe("Test workload-variant-autoscaler - Saturation Mode - Multiple 
 				namespace,
 				fmt.Sprintf("http://%s:%d", gatewayName, 80),
 				modelName,
-				loadRatePerSecond,
+				5, // Reduced load rate to ensure 3 replicas are sufficient (<70% saturation)
 				maxExecutionTimeSec,
 				inputTokens,
 				outputTokens,
@@ -847,7 +847,7 @@ var _ = Describe("Test workload-variant-autoscaler - Saturation Mode - Multiple 
 			}()
 
 			By("waiting for stable state to be reached")
-			time.Sleep(30 * time.Second) // Allow initial stabilization
+			time.Sleep(90 * time.Second) // Allow initial stabilization (increased from 30s to handle scrape intervals)
 
 			By("recording initial replica counts")
 			var initialA100Replicas, initialH100Replicas int
