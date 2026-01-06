@@ -380,9 +380,9 @@ func TestCalculatesaturationTargets_ScaleUpCheapest(t *testing.T) {
 	}
 
 	variantStates := []interfaces.VariantReplicaState{
-		{VariantName: "v1-expensive", CurrentReplicas: 2, DesiredReplicas: 0},
-		{VariantName: "v2-cheap", CurrentReplicas: 2, DesiredReplicas: 0},
-		{VariantName: "v3-medium", CurrentReplicas: 2, DesiredReplicas: 0},
+		{VariantName: "v1-expensive", CurrentReplicas: 2, ReadyReplicas: 2, DesiredReplicas: 0},
+		{VariantName: "v2-cheap", CurrentReplicas: 2, ReadyReplicas: 2, DesiredReplicas: 0},
+		{VariantName: "v3-medium", CurrentReplicas: 2, ReadyReplicas: 2, DesiredReplicas: 0},
 	}
 
 	targets := analyzer.CalculateSaturationTargets(context.Background(), saturationAnalysis, variantStates)
@@ -417,9 +417,9 @@ func TestCalculatesaturationTargets_ScaleDownMostExpensive(t *testing.T) {
 	}
 
 	variantStates := []interfaces.VariantReplicaState{
-		{VariantName: "v1-expensive", CurrentReplicas: 2, DesiredReplicas: 0},
-		{VariantName: "v2-cheap", CurrentReplicas: 2, DesiredReplicas: 0},
-		{VariantName: "v3-medium", CurrentReplicas: 2, DesiredReplicas: 0},
+		{VariantName: "v1-expensive", CurrentReplicas: 2, ReadyReplicas: 2, DesiredReplicas: 0},
+		{VariantName: "v2-cheap", CurrentReplicas: 2, ReadyReplicas: 2, DesiredReplicas: 0},
+		{VariantName: "v3-medium", CurrentReplicas: 2, ReadyReplicas: 2, DesiredReplicas: 0},
 	}
 
 	targets := analyzer.CalculateSaturationTargets(context.Background(), saturationAnalysis, variantStates)
@@ -454,8 +454,9 @@ func TestCalculatesaturationTargets_PreserveDesired(t *testing.T) {
 
 	// v1 has desired > current (previous optimizer wanted to scale up)
 	variantStates := []interfaces.VariantReplicaState{
-		{VariantName: "v1-expensive", CurrentReplicas: 2, DesiredReplicas: 4},
-		{VariantName: "v2-cheap", CurrentReplicas: 2, DesiredReplicas: 0},
+		// v1 is transitioning, so ReadyReplicas might be different, but for this test we focus on v2
+		{VariantName: "v1-expensive", CurrentReplicas: 2, ReadyReplicas: 2, DesiredReplicas: 4},
+		{VariantName: "v2-cheap", CurrentReplicas: 2, ReadyReplicas: 2, DesiredReplicas: 0},
 	}
 
 	targets := analyzer.CalculateSaturationTargets(context.Background(), saturationAnalysis, variantStates)
