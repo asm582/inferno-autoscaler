@@ -51,7 +51,6 @@ func makeValidVA() *VariantAutoscaling {
 				Accelerator: "nvidia.com/mig-1g.5gb",
 				NumReplicas: 1,
 				MaxBatch:    8,
-				VariantCost: "1.23",
 				ITLAverage:  "45.6",
 				TTFTAverage: "3.2",
 				Load: LoadProfile{

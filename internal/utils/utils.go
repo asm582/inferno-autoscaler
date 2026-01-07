@@ -275,7 +275,20 @@ func AddServerInfoToSystemData(
 	}
 
 	// server allocation
-	if cost, err = strconv.ParseFloat(va.Status.CurrentAlloc.VariantCost, 32); err != nil || !CheckValue(cost) {
+	// Calculate cost from Spec.VariantCost (unit cost) * Replicas
+	var unitCost float64
+	if va.Spec.VariantCost != "" {
+		if val, err := strconv.ParseFloat(va.Spec.VariantCost, 64); err == nil {
+			unitCost = val
+		}
+	}
+	// TODO: Use a constant for default cost if not set, or rely on CRD defaulting
+	if unitCost == 0 {
+		unitCost = 10.0 // Fallback/Default
+	}
+
+	cost = unitCost * float64(va.Status.CurrentAlloc.NumReplicas)
+	if !CheckValue(cost) {
 		cost = 0
 	}
 	if itlAverage, err = strconv.ParseFloat(va.Status.CurrentAlloc.ITLAverage, 32); err != nil || !CheckValue(itlAverage) {

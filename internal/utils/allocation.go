@@ -36,7 +36,8 @@ func BuildAllocationFromMetrics(
 	}
 
 	// Calculate variant cost
-	discoveredCost := float64(*deployment.Spec.Replicas) * acceleratorCost
+	// VariantCost removed from Status as it is duplicated from Spec (per-replica cost)
+	// or derived (total cost).
 
 	// Max batch size - TODO: collect value from server
 	maxBatch := 256
@@ -46,7 +47,6 @@ func BuildAllocationFromMetrics(
 	ttftMilliseconds := metrics.TTFTSeconds * 1000
 	itlMilliseconds := metrics.ITLSeconds * 1000
 
-	variantCostStr := strconv.FormatFloat(discoveredCost, 'f', 2, 64)
 	ttftAverageStr := strconv.FormatFloat(ttftMilliseconds, 'f', 2, 64)
 	itlAverageStr := strconv.FormatFloat(itlMilliseconds, 'f', 2, 64)
 	arrivalRateStr := strconv.FormatFloat(metrics.ArrivalRate, 'f', 2, 64)
@@ -58,7 +58,7 @@ func BuildAllocationFromMetrics(
 		Accelerator: acc,
 		NumReplicas: numReplicas,
 		MaxBatch:    maxBatch,
-		VariantCost: variantCostStr,
+		// VariantCost removed from Status
 		TTFTAverage: ttftAverageStr,
 		ITLAverage:  itlAverageStr,
 		Load: v1alpha1.LoadProfile{

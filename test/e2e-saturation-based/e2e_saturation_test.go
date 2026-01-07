@@ -960,10 +960,10 @@ var _ = Describe("Test workload-variant-autoscaler - Saturation Mode - Multiple 
 					"Total replicas should increase under high load")
 
 				// Verify cost information is available
-				a100Cost, err := strconv.ParseFloat(vaA100.Status.CurrentAlloc.VariantCost, 64)
+				a100Cost, err := strconv.ParseFloat(vaA100.Spec.VariantCost, 64)
 				g.Expect(err).NotTo(HaveOccurred(), "A100 cost should be parseable")
 
-				h100Cost, err := strconv.ParseFloat(vaH100.Status.CurrentAlloc.VariantCost, 64)
+				h100Cost, err := strconv.ParseFloat(vaH100.Spec.VariantCost, 64)
 				g.Expect(err).NotTo(HaveOccurred(), "H100 cost should be parseable")
 
 				// In Saturation-based mode with cost-awareness, cheaper variant should get more replicas

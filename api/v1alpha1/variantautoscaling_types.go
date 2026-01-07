@@ -102,10 +102,6 @@ type Allocation struct {
 	// +kubebuilder:validation:Minimum=0
 	MaxBatch int `json:"maxBatch"`
 
-	// VariantCost is the cost associated with the current variant allocation.
-	// +kubebuilder:validation:Pattern=`^\d+(\.\d+)?$`
-	VariantCost string `json:"variantCost"`
-
 	// ITLAverage is the average inter token latency for the current allocation.
 	// +kubebuilder:validation:Pattern=`^\d+(\.\d+)?$`
 	ITLAverage string `json:"itlAverage"`

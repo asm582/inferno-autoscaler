@@ -532,7 +532,7 @@ func (e *Engine) CollectMetricsForSaturationMode(
 			"accelerator", currentAllocation.Accelerator,
 			"ttft", currentAllocation.TTFTAverage,
 			"itl", currentAllocation.ITLAverage,
-			"cost", currentAllocation.VariantCost)
+			"cost", cost)
 	}
 
 	return nil

@@ -285,11 +285,6 @@ spec:
                       the current allocation
                     pattern: ^\d+(\.\d+)?$
                     type: string
-                  variantCost:
-                    description: VariantCost is the cost associated with the current
-                      variant allocation.
-                    pattern: ^\d+(\.\d+)?$
-                    type: string
                 required:
                 - accelerator
                 - itlAverage
@@ -297,7 +292,6 @@ spec:
                 - maxBatch
                 - numReplicas
                 - ttftAverage
-                - variantCost
                 type: object
               desiredOptimizedAlloc:
                 description: DesiredOptimizedAlloc indicates the target optimized

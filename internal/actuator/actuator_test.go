@@ -239,7 +239,6 @@ var _ = Describe("Actuator", func() {
 						NumReplicas: 2,
 						Accelerator: "A100",
 						MaxBatch:    32,
-						VariantCost: "10.5",
 						ITLAverage:  "100.0",
 						// WaitAverage: "50.0",
 						Load: llmdVariantAutoscalingV1alpha1.LoadProfile{
@@ -388,7 +387,6 @@ var _ = Describe("Actuator", func() {
 						NumReplicas: 1,
 						Accelerator: "A100",
 						MaxBatch:    32,
-						VariantCost: "5.0",
 						ITLAverage:  "80.0",
 						// WaitAverage: "30.0",
 						Load: llmdVariantAutoscalingV1alpha1.LoadProfile{
@@ -567,7 +565,6 @@ var _ = Describe("Actuator", func() {
 						NumReplicas: 2,
 						Accelerator: "A100",
 						MaxBatch:    32,
-						VariantCost: "10.0",
 						ITLAverage:  "90.0",
 						// WaitAverage: "40.0",
 						Load: llmdVariantAutoscalingV1alpha1.LoadProfile{
