@@ -548,15 +548,6 @@ data:
 							Name: name,
 						},
 						ModelID: modelID,
-						ModelProfile: llmdVariantAutoscalingV1alpha1.ModelProfile{
-							Accelerators: []llmdVariantAutoscalingV1alpha1.AcceleratorProfile{
-								{
-									Acc:          "A100",
-									AccCount:     1,
-									MaxBatchSize: 4,
-								},
-							},
-						},
 					},
 				}
 				Expect(k8sClient.Create(ctx, r)).To(Succeed())
