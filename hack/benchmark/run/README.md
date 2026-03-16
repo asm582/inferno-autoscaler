@@ -15,7 +15,12 @@ git clone https://github.com/kubernetes-sigs/llm-d-benchmark.git
 cd llm-d-benchmark
 ```
 
-### 2. Place the Script
+### 2. Apply Upstream Configurations
+
+Before running the setup or the benchmark, you must configure the flow controller and workload profiles. 
+Please refer to the instructions in [`../config-to-be-moved/README.md`](../config-to-be-moved/README.md) to copy the necessary scenario scripts and GuideLLM profiles into your cloned `llm-d-benchmark` repository.
+
+### 3. Place the Script
 
 The `run_ci_benchmark.sh` script relies on relative paths to find the setup scripts and scenarios within the `llm-d` repository. Specifically, it resolves the repository root as the parent directory of the script's location:
 ```bash
@@ -33,7 +38,7 @@ cp /path/to/inferno-autoscaler/hack/benchmark/run/run_ci_benchmark.sh scripts/
 
 This ensures that the script correctly locates `setup/env.sh`, `setup/teardown.sh`, `setup/standup.sh`, and the scenario files.
 
-### 3. Run the Benchmark
+### 4. Run the Benchmark
 
 Once the script is in the correct location (e.g., `llm-d-benchmark/scripts/run_ci_benchmark.sh`), you can execute it:
 
