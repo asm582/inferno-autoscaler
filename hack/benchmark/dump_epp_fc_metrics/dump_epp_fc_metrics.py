@@ -49,7 +49,7 @@ def main():
     
     yaml_last = os.path.join(results_dir, "benchmark_report,_results.json_3.yaml")
     yaml_last_alt = os.path.join(results_dir, "benchmark_report_v0.2,_results.json_3.yaml")
-    end_yaml = yaml_last if os.path.exists(yaml_last) else (yaml_last_alt if os.path.exists(yaml_last_alt) else None)
+    end_yaml = yaml_last if os.path.exists(yaml_last) else (yaml_last_alt if os.path.exists(yaml_last_alt) else start_yaml)
     
     start_time = None
     end_time = None
@@ -75,31 +75,31 @@ def main():
     # Other metrics like duration are histograms or summaries in Prometheus, so we generally look at the raw metric.
     metrics = {
         # Flow Control Metrics
-        "queue_duration": 'inference_extension_flow_control_request_queue_duration_seconds',
-        "queue_size": 'sum(inference_extension_flow_control_queue_size)',
-        "queue_bytes": 'sum(inference_extension_flow_control_queue_bytes)',
-        "dispatch_cycle": 'inference_extension_flow_control_dispatch_cycle_duration_seconds',
-        "enqueue_duration": 'inference_extension_flow_control_request_enqueue_duration_seconds',
-        "pool_saturation": 'inference_extension_flow_control_pool_saturation',
+        "queue_duration": f'inference_extension_flow_control_request_queue_duration_seconds{{namespace="{namespace}"}}',
+        "queue_size": f'sum(inference_extension_flow_control_queue_size{{namespace="{namespace}"}})',
+        "queue_bytes": f'sum(inference_extension_flow_control_queue_bytes{{namespace="{namespace}"}})',
+        "dispatch_cycle": f'inference_extension_flow_control_dispatch_cycle_duration_seconds{{namespace="{namespace}"}}',
+        "enqueue_duration": f'inference_extension_flow_control_request_enqueue_duration_seconds{{namespace="{namespace}"}}',
+        "pool_saturation": f'inference_extension_flow_control_pool_saturation{{namespace="{namespace}"}}',
         
         # General EPP Objective Metrics
-        "request_total": 'inference_objective_request_total',
-        "request_error_total": 'inference_objective_request_error_total',
-        "running_requests": 'inference_objective_running_requests',
-        "request_duration_seconds": 'inference_objective_request_duration_seconds_sum',
-        "request_duration_count": 'inference_objective_request_duration_seconds_count',
-        "request_sizes_bytes": 'inference_objective_request_sizes_sum',
-        "response_sizes_bytes": 'inference_objective_response_sizes_sum',
-        "input_tokens": 'inference_objective_input_tokens_sum',
-        "output_tokens": 'inference_objective_output_tokens_sum',
-        "prompt_cached_tokens": 'inference_objective_prompt_cached_tokens_sum',
-        "normalized_ttft": 'inference_objective_normalized_time_per_output_token_seconds_sum',
+        "request_total": f'inference_objective_request_total{{namespace="{namespace}"}}',
+        "request_error_total": f'inference_objective_request_error_total{{namespace="{namespace}"}}',
+        "running_requests": f'inference_objective_running_requests{{namespace="{namespace}"}}',
+        "request_duration_seconds": f'inference_objective_request_duration_seconds_sum{{namespace="{namespace}"}}',
+        "request_duration_count": f'inference_objective_request_duration_seconds_count{{namespace="{namespace}"}}',
+        "request_sizes_bytes": f'inference_objective_request_sizes_sum{{namespace="{namespace}"}}',
+        "response_sizes_bytes": f'inference_objective_response_sizes_sum{{namespace="{namespace}"}}',
+        "input_tokens": f'inference_objective_input_tokens_sum{{namespace="{namespace}"}}',
+        "output_tokens": f'inference_objective_output_tokens_sum{{namespace="{namespace}"}}',
+        "prompt_cached_tokens": f'inference_objective_prompt_cached_tokens_sum{{namespace="{namespace}"}}',
+        "normalized_ttft": f'inference_objective_normalized_time_per_output_token_seconds_sum{{namespace="{namespace}"}}',
 
         # EPP Pool Metrics
-        "pool_per_pod_queue_size": 'inference_pool_per_pod_queue_size',
-        "pool_average_queue_size": 'inference_pool_average_queue_size',
-        "pool_average_kv_cache_utilization": 'inference_pool_average_kv_cache_utilization',
-        "pool_ready_pods": 'inference_pool_ready_pods'
+        "pool_per_pod_queue_size": f'inference_pool_per_pod_queue_size{{namespace="{namespace}"}}',
+        "pool_average_queue_size": f'inference_pool_average_queue_size{{namespace="{namespace}"}}',
+        "pool_average_kv_cache_utilization": f'inference_pool_average_kv_cache_utilization{{namespace="{namespace}"}}',
+        "pool_ready_pods": f'inference_pool_ready_pods{{namespace="{namespace}"}}'
     }
 
     dump_data = {}

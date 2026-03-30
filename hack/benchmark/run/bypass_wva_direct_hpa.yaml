@@ -40,7 +40,7 @@ spec:
         averageValue: "250"
   behavior:
     scaleUp:
-      stabilizationWindowSeconds: 240
+      stabilizationWindowSeconds: 0
       policies:
       - type: Percent
         value: 100
