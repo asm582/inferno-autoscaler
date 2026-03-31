@@ -266,6 +266,20 @@ echo "==========================================================================
 echo "▶️ STEP 6: Automating Data Extraction & Visualization"
 echo "============================================================================="
 
+export PYTHONDONTWRITEBYTECODE=1
+
+# Establish deterministic Python virtual environment
+VENV_DIR="$BASE_DIR/hack/benchmark/.venv"
+if [ ! -d "$VENV_DIR" ]; then
+    echo "Creating fully isolated Python virtual environment..."
+    python3 -m venv "$VENV_DIR"
+    source "$VENV_DIR/bin/activate"
+    pip install --upgrade pip
+    pip install -r "$BASE_DIR/hack/benchmark/requirements.txt"
+else
+    source "$VENV_DIR/bin/activate"
+fi
+
 # Extract latest raw json logs
 if [ -z "$LATEST_DIR" ]; then
     echo "Locating latest benchmark results in PVC fallback..."
