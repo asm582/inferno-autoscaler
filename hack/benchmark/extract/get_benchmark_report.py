@@ -162,7 +162,7 @@ def parse_guidellm_latencies(filepath: str) -> Tuple[List[str], List[float], Lis
             req_lat_mean.append(reqlat.get('mean', 0) * 1000)
             
     except Exception as e:
-        print(f"Warning: Could not parse letencies from {filepath}: {e}")
+        print(f"Warning: Could not parse latencies from {filepath}: {e}")
         
     return labels, ttft_mean, ttft_p99, itl_mean, itl_p99, tps_mean, conc_mean, req_lat_mean
 
