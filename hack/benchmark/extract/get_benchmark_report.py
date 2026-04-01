@@ -183,8 +183,8 @@ def main():
     parser = argparse.ArgumentParser(description="Fetch startup metrics and plot usage metrics from Prometheus.")
     parser.add_argument(
         "-n", "--namespace",
-        default="asmalvan-test",
-        help="The namespace to query (default: asmalvan-test)"
+        default="default",
+        help="The namespace to query (default: default)"
     )
     parser.add_argument(
         "-w", "--window",

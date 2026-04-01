@@ -17,7 +17,15 @@ This benchmarking suite acts as a wrapper around the `llm-d-benchmark` repositor
 Ensure `llm-d-benchmark` is cloned **inside the `wva-autoscaler` root directory**:
 ```bash
 cd /path/to/wva-autoscaler
-git clone https://github.com/kubernetes-sigs/llm-d-benchmark.git
+git clone https://github.com/llm-d/llm-d-benchmark.git
+```
+
+### 2. Export Required HuggingFace Token
+
+The `llm-d-benchmark` deployment layer strictly requires a HuggingFace authentication token to spin up the vLLM modelservice endpoint (even for public/non-gated models).
+You **MUST** export your token to your shell environment before initiating the test orchestrator:
+```bash
+export LLMDBENCH_HF_TOKEN="hf_your_token_here"
 ```
 
 ## Running Benchmarks
@@ -33,7 +41,7 @@ cd run
 
 | Flag | Default | Description |
 |---|---|---|
-| `-n` | `asmalvan-test` | The Kubernetes namespace to use for the benchmark. |
+| `-n` | `default` | The Kubernetes namespace to use for the benchmark. |
 | `-m` | `Qwen/Qwen3-0.6B` | The model to deploy and benchmark. |
 | `-s` | `inference-scheduling` | The scenario file to use during the standup phase. |
 | `-w` | `chatbot_synthetic` | The workload profile to simulate (e.g., `chatbot_synthetic`, `symmetrical`). It will auto-detect matching profiles in `scenarios/`. |

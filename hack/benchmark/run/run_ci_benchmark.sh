@@ -9,7 +9,7 @@ set -e
 set -x
 
 # --- Configuration Variables ---
-NAMESPACE="asmalvan-test"
+NAMESPACE="default"
 MODEL="Qwen/Qwen3-0.6B"
 SCENARIO="inference-scheduling"
 WORKLOAD_PROFILE="chatbot_synthetic"
@@ -74,20 +74,38 @@ echo "==========================================================================
 
 # Temporarily inject exactly 0 prefill and 1 decode replica into the scenario file on-the-fly
 echo "Injecting 0 prefill and 1 decode replica override into ${SCENARIO_PATH}..."
-sed -i.bak -e 's/LLMDBENCH_VLLM_MODELSERVICE_PREFILL_REPLICAS=.*/LLMDBENCH_VLLM_MODELSERVICE_PREFILL_REPLICAS=0/' \
-           -e 's/LLMDBENCH_VLLM_MODELSERVICE_DECODE_REPLICAS=.*/LLMDBENCH_VLLM_MODELSERVICE_DECODE_REPLICAS=1/' "${SCENARIO_PATH}"
+cp "${SCENARIO_PATH}" "${SCENARIO_PATH}.bak"
+
+# Trap guarantees restoration of the file even if standup script crashes violently
+trap 'mv "${SCENARIO_PATH}.bak" "${SCENARIO_PATH}" 2>/dev/null || true' EXIT INT TERM
+
+sed -e 's/LLMDBENCH_VLLM_MODELSERVICE_PREFILL_REPLICAS=.*/LLMDBENCH_VLLM_MODELSERVICE_PREFILL_REPLICAS=0/' \
+    -e 's/LLMDBENCH_VLLM_MODELSERVICE_DECODE_REPLICAS=.*/LLMDBENCH_VLLM_MODELSERVICE_DECODE_REPLICAS=1/' "${SCENARIO_PATH}" > "${SCENARIO_PATH}.tmp"
+mv "${SCENARIO_PATH}.tmp" "${SCENARIO_PATH}"
 
 "${REPO_ROOT}/setup/standup.sh" -p "${NAMESPACE}" -m "${MODEL}" -c "${SCENARIO}" --wva
 
-# Revert the scenario file back to its pristine state
+# Revert the scenario file back to its pristine state immediately upon success
 echo "Reverting ${SCENARIO_PATH} to original state..."
 mv "${SCENARIO_PATH}.bak" "${SCENARIO_PATH}"
+trap - EXIT INT TERM
 
 if [ "$DIRECT_HPA" -eq 1 ]; then
     echo "============================================================================="
     echo "▶️ OPTIONAL: Applying Direct HPA Override"
     echo "============================================================================="
-    oc apply -f "${REPO_ROOT}/../hack/benchmark/run/bypass_wva_direct_hpa.yaml" -n "${NAMESPACE}"
+    
+    # Find the matching decode deployment name dynamically by structural suffix
+    DECODE_DEPLOY=$(oc get deploy -n "${NAMESPACE}" -o custom-columns=":metadata.name" --no-headers | grep "\-decode" | head -n 1)
+    
+    if [ -z "$DECODE_DEPLOY" ]; then
+        echo "❌ ERROR: Could not dynamically find decode deployment for model ${MODEL} in namespace ${NAMESPACE}"
+        exit 1
+    fi
+    
+    echo "Dynamically targeting deployment: ${DECODE_DEPLOY} for Direct HPA..."
+    sed "s/TARGET_DEPLOYMENT_NAME/$DECODE_DEPLOY/g" "${BASE_DIR}/hack/benchmark/run/bypass_wva_direct_hpa.yaml" | oc apply -n "${NAMESPACE}" -f -
+    
     echo "✅ Direct HPA deployed and WVA Controller scaled to 0."
 elif [ -n "$WVA_THRESHOLD_CONFIG" ]; then
     echo "============================================================================="
@@ -318,8 +336,6 @@ cd "$EXP_DATA_DIR" || exit 1
 
 python3 "$EXTRACT_DIR/get_benchmark_report.py" $REPORT_ARGS
 
-# Cleanup deterministic isolation buffer
-rm -f "$SNIPER_FILE"
 
 echo "============================================================================="
 echo "✅ CI Benchmark Run Fully Complete!"

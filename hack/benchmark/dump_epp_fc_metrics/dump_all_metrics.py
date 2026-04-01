@@ -226,7 +226,7 @@ def get_autoscaling_config(namespace: str) -> Tuple[str, float]:
 
 def main():
     parser = argparse.ArgumentParser(description="Dump ALL cluster metrics and configurations for offline report generation.")
-    parser.add_argument("-n", "--namespace", default="asmalvan-test", help="The namespace to query")
+    parser.add_argument("-n", "--namespace", default="default", help="The namespace to query")
     parser.add_argument("-r", "--results-dir", required=True, help="Path to the GuideLLM exp-docs folder")
     parser.add_argument("-t", "--token", default=None, help="OpenShift login token")
     parser.add_argument("-s", "--server", default=None, help="OpenShift server URL")

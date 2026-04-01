@@ -6,18 +6,18 @@ import datetime
 import yaml
 
 try:
-    from get_benchmark_report import check_privileges, query_prometheus_range
+    from dump_all_metrics import check_privileges, query_prometheus_range
 except ImportError as e:
-    print(f"Error importing from get_benchmark_report: {e}")
-    print("Ensure this script is running in the same directory as get_benchmark_report.py")
+    print(f"Error importing from dump_all_metrics: {e}")
+    print("Ensure this script is running in the same directory as dump_all_metrics.py")
     exit(1)
 
 def main():
     parser = argparse.ArgumentParser(description="Dump Flow Control metrics for a specific run.")
     parser.add_argument(
         "-n", "--namespace",
-        default="asmalvan-test",
-        help="The namespace to query (default: asmalvan-test)"
+        default="default",
+        help="The namespace to query (default: default)"
     )
     parser.add_argument(
         "-r", "--results-dir",

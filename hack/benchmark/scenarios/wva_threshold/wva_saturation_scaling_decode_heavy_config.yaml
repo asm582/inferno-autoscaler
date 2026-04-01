@@ -2,7 +2,6 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: workload-variant-autoscaler-wva-saturation-scaling-config
-  namespace: asmalvan-test
   labels:
     app.kubernetes.io/instance: workload-variant-autoscaler
     app.kubernetes.io/name: workload-variant-autoscaler

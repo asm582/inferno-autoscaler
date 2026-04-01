@@ -3,7 +3,6 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: workload-variant-autoscaler-controller-manager
-  namespace: asmalvan-test
 spec:
   replicas: 0
 
@@ -13,13 +12,12 @@ apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
   name: workload-variant-autoscaler-hpa
-  namespace: asmalvan-test
 spec:
   scaleTargetRef:
     apiVersion: apps/v1
     kind: Deployment
     # This is the model server (decode) deployment we want to scale
-    name: qwen-qwe-36bdcf50-en3-0-6b-decode
+    name: TARGET_DEPLOYMENT_NAME
   minReplicas: 1
   maxReplicas: 10
   metrics:
