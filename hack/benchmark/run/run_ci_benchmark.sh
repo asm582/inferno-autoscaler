@@ -308,13 +308,13 @@ if [ -z "$LATEST_DIR" ]; then
     fi
 fi
 
-EXP_DATA_DIR="$REPO_ROOT/../exp_data/$(basename $LATEST_DIR)"
+EXP_DATA_DIR="$BASE_DIR/exp_data/$(basename $LATEST_DIR)"
 echo "Copying out $LATEST_DIR to $EXP_DATA_DIR ..."
 mkdir -p "$EXP_DATA_DIR"
 oc rsync -n "${NAMESPACE}" "access-to-harness-data-workload-pvc:${LATEST_DIR}/" "${EXP_DATA_DIR}/" --include='*.yaml' --include='*.json' --exclude='*' || echo "⚠️ Warning: oc rsync threw non-zero exit, proceeding..."
 
 # Jump to Python extract scripts
-EXTRACT_DIR="$REPO_ROOT/../hack/benchmark/extract"
+EXTRACT_DIR="$BASE_DIR/hack/benchmark/extract"
 cd "$EXTRACT_DIR" || exit 1
 
 DUMP_ARGS="-r $EXP_DATA_DIR -n $NAMESPACE"
