@@ -162,6 +162,15 @@ func buildQMConfig(
 		if defaultCfg.SLOMultiplier > 1.0 {
 			cfg.SLOMultiplier = defaultCfg.SLOMultiplier
 		}
+		if defaultCfg.TargetTTFT > 0 && defaultCfg.TargetITL > 0 {
+			modelKey := queueingmodel.MakeModelKey(namespace, modelID)
+			cfg.SLOTargets = map[string]*queueingmodel.SLOTarget{
+				modelKey: {
+					TargetTTFT: defaultCfg.TargetTTFT,
+					TargetITL:  defaultCfg.TargetITL,
+				},
+			}
+		}
 	}
 
 	// Scan for a per-model override matching this model
