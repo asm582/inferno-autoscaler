@@ -39,7 +39,9 @@ func RegisterQueueingModelQueries(sourceRegistry *source.SourceRegistry) {
 		Name: QuerySchedulerDispatchRate,
 		Type: source.QueryTypePromQL,
 		Template: `sum by (pod_name, namespace) (rate(inference_extension_scheduler_attempts_total{status="success",namespace="{{.namespace}}",target_model_name="{{.modelID}}"}[1m]))` +
-			` or sum by (pod_name, namespace) (rate(inference_extension_scheduler_attempts_total{status="success",namespace="{{.namespace}}",model_name="{{.modelID}}",target_model_name=""}[1m]))`,
+			` or sum by (pod_name, namespace) (rate(inference_extension_scheduler_attempts_total{status="success",namespace="{{.namespace}}",model_name="{{.modelID}}",target_model_name=""}[1m]))` +
+			` or sum by (pod_name) (rate(inference_extension_scheduler_attempts_total{status="success",target_model_name="{{.modelID}}"}[1m]))` +
+			` or sum by (pod_name) (rate(inference_extension_scheduler_attempts_total{status="success",model_name="{{.modelID}}",target_model_name=""}[1m]))`,
 		Params: []string{source.ParamNamespace, source.ParamModelID},
 		Description: "Request dispatch rate per endpoint (requests/sec) from scheduler, " +
 			"representing the arrival rate to each replica for a specific model",
