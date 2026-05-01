@@ -30,6 +30,7 @@ gpu.cluster
 # llm-d and llm-d-infra directories
 llm-d/
 llm-d-infra/
+llm-d-benchmark/
 llmd/
 llmd-infra/
 
