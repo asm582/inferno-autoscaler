@@ -1,4 +1,5 @@
-name: "Symmetrical"
+target: REPLACE_ENV_LLMDBENCH_HARNESS_STACK_ENDPOINT_URL
+model: REPLACE_ENV_LLMDBENCH_DEPLOY_CURRENT_MODELname: "Symmetrical"
 description: "Balanced workload with equal input and output token lengths"
 promptTokens: 1000
 outputTokens: 1000

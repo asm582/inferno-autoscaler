@@ -421,8 +421,12 @@ test-benchmark-with-setup: deploy-e2e-infra test-benchmark
 
 ##@ llm-d-benchmark CLI (standup / run / teardown)
 
-# Common llmdbenchmark flags (spec + workspace)
-BENCHMARK_CLI_FLAGS = --spec $(BENCHMARK_SPEC) --workspace $(BENCHMARK_WORKSPACE)
+# llmdbenchmark binary from the benchmark repo venv
+BENCHMARK_VENV       = $(BENCHMARK_REPO_DIR)/.venv
+LLMDBENCHMARK        = $(BENCHMARK_VENV)/bin/llmdbenchmark
+
+# Common llmdbenchmark flags (spec + workspace + base dir for config resolution)
+BENCHMARK_CLI_FLAGS = --spec $(BENCHMARK_SPEC) --workspace $(BENCHMARK_WORKSPACE) --base-dir $(BENCHMARK_REPO_DIR)
 
 .PHONY: benchmark-install
 benchmark-install: ## Clone llm-d-benchmark and install the llmdbenchmark CLI
@@ -440,7 +444,7 @@ benchmark-standup: ## Stand up the benchmark environment (set BENCHMARK_NAMESPAC
 		echo "ERROR: BENCHMARK_NAMESPACE is required. Usage: make benchmark-standup BENCHMARK_NAMESPACE=<namespace>"; \
 		exit 1; \
 	fi
-	llmdbenchmark $(BENCHMARK_CLI_FLAGS) standup \
+	$(LLMDBENCHMARK) $(BENCHMARK_CLI_FLAGS) standup \
 		-p $(BENCHMARK_NAMESPACE) \
 		$(if $(filter true,$(BENCHMARK_MONITORING)),--monitoring,)
 
@@ -450,14 +454,13 @@ benchmark-run: ## Run a single benchmark workload (set BENCHMARK_NAMESPACE=<name
 		echo "ERROR: BENCHMARK_NAMESPACE is required. Usage: make benchmark-run BENCHMARK_NAMESPACE=<namespace>"; \
 		exit 1; \
 	fi
-	llmdbenchmark $(BENCHMARK_CLI_FLAGS) run \
+	$(LLMDBENCHMARK) $(BENCHMARK_CLI_FLAGS) run \
 		-p $(BENCHMARK_NAMESPACE) \
 		-l $(BENCHMARK_HARNESS) \
-		-w $(BENCHMARK_WORKLOAD) \
-		$(if $(filter true,$(BENCHMARK_FORCE)),-f,)
+		-w $(BENCHMARK_WORKLOAD)
 
 .PHONY: benchmark-run-all
-benchmark-run-all: ## Run all scenarios from test/benchmark/scenarios/ (set BENCHMARK_NAMESPACE=<namespace>)
+benchmark-run-all: ## Run all scenarios: teardown → standup → run per scenario (set BENCHMARK_NAMESPACE=<namespace>)
 	@if [ -z "$(BENCHMARK_NAMESPACE)" ]; then \
 		echo "ERROR: BENCHMARK_NAMESPACE is required. Usage: make benchmark-run-all BENCHMARK_NAMESPACE=<namespace>"; \
 		exit 1; \
@@ -466,13 +469,28 @@ benchmark-run-all: ## Run all scenarios from test/benchmark/scenarios/ (set BENC
 		scenario_name=$$(basename "$$scenario"); \
 		echo ""; \
 		echo "=========================================="; \
-		echo "Running scenario: $$scenario_name"; \
+		echo "[1/3] Tearing down before: $$scenario_name"; \
 		echo "=========================================="; \
-		llmdbenchmark $(BENCHMARK_CLI_FLAGS) run \
+		$(LLMDBENCHMARK) $(BENCHMARK_CLI_FLAGS) teardown \
+			-p $(BENCHMARK_NAMESPACE) || true; \
+		echo ""; \
+		echo "=========================================="; \
+		echo "[2/3] Standing up for: $$scenario_name"; \
+		echo "=========================================="; \
+		$(LLMDBENCHMARK) $(BENCHMARK_CLI_FLAGS) standup \
+			-p $(BENCHMARK_NAMESPACE) \
+			$(if $(filter true,$(BENCHMARK_MONITORING)),--monitoring,) || { \
+			echo "ERROR: Standup failed for $$scenario_name"; \
+			exit 1; \
+		}; \
+		echo ""; \
+		echo "=========================================="; \
+		echo "[3/3] Running scenario: $$scenario_name"; \
+		echo "=========================================="; \
+		$(LLMDBENCHMARK) $(BENCHMARK_CLI_FLAGS) run \
 			-p $(BENCHMARK_NAMESPACE) \
 			-l $(BENCHMARK_HARNESS) \
-			-w "$$scenario_name" \
-			$(if $(filter true,$(BENCHMARK_FORCE)),-f,) || { \
+			-w "$$scenario_name" || { \
 			echo "ERROR: Scenario $$scenario_name failed"; \
 			exit 1; \
 		}; \
@@ -488,7 +506,7 @@ benchmark-teardown: ## Tear down the benchmark environment (set BENCHMARK_NAMESP
 		echo "ERROR: BENCHMARK_NAMESPACE is required. Usage: make benchmark-teardown BENCHMARK_NAMESPACE=<namespace>"; \
 		exit 1; \
 	fi
-	llmdbenchmark $(BENCHMARK_CLI_FLAGS) teardown \
+	$(LLMDBENCHMARK) $(BENCHMARK_CLI_FLAGS) teardown \
 		-p $(BENCHMARK_NAMESPACE)
 
 .PHONY: benchmark-full

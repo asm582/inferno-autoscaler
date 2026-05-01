@@ -1,3 +1,5 @@
+target: REPLACE_ENV_LLMDBENCH_HARNESS_STACK_ENDPOINT_URL
+model: REPLACE_ENV_LLMDBENCH_DEPLOY_CURRENT_MODEL
 name: "Prefill Heavy"
 description: "Stress-tests prefill (prompt processing) with long input, short output"
 promptTokens: 4000
