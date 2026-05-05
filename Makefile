@@ -38,6 +38,7 @@ BENCHMARK_HARNESS    ?= guidellm
 BENCHMARK_WORKLOAD   ?= prefill_heavy.yaml
 BENCHMARK_FORCE      ?= true
 BENCHMARK_MONITORING ?= true
+BENCHMARK_UV         ?= false
 BENCHMARK_SCENARIOS_DIR ?= $(CURDIR)/test/benchmark/scenarios
 
 # Map scenario name to Ginkgo label filter
@@ -436,7 +437,7 @@ benchmark-install: ## Clone llm-d-benchmark and install the llmdbenchmark CLI
 	else \
 		echo "llm-d-benchmark already cloned at $(BENCHMARK_REPO_DIR)"; \
 	fi
-	@cd $(BENCHMARK_REPO_DIR) && ./install.sh --no-uv
+	@cd $(BENCHMARK_REPO_DIR) && ./install.sh $(if $(filter true,$(BENCHMARK_UV)),--uv,--no-uv)
 
 .PHONY: benchmark-standup
 benchmark-standup: ## Stand up the benchmark environment (set BENCHMARK_NAMESPACE=<namespace>)
@@ -454,10 +455,15 @@ benchmark-run: ## Run a single benchmark workload (set BENCHMARK_NAMESPACE=<name
 		echo "ERROR: BENCHMARK_NAMESPACE is required. Usage: make benchmark-run BENCHMARK_NAMESPACE=<namespace>"; \
 		exit 1; \
 	fi
+	@if [ -f "$(BENCHMARK_SCENARIOS_DIR)/$(BENCHMARK_WORKLOAD)" ]; then \
+		cp "$(BENCHMARK_SCENARIOS_DIR)/$(BENCHMARK_WORKLOAD)" \
+		   "$(BENCHMARK_REPO_DIR)/workload/profiles/$(BENCHMARK_HARNESS)/$(BENCHMARK_WORKLOAD)"; \
+	fi
 	$(LLMDBENCHMARK) $(BENCHMARK_CLI_FLAGS) run \
 		-p $(BENCHMARK_NAMESPACE) \
 		-l $(BENCHMARK_HARNESS) \
-		-w $(BENCHMARK_WORKLOAD)
+		-w $(BENCHMARK_WORKLOAD) \
+		$(if $(filter true,$(BENCHMARK_MONITORING)),--monitoring,)
 
 .PHONY: benchmark-run-all
 benchmark-run-all: ## Run all scenarios: teardown → standup → run per scenario (set BENCHMARK_NAMESPACE=<namespace>)
