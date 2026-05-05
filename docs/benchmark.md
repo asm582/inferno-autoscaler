@@ -48,22 +48,66 @@ Summary of WVA benchmark runs with configuration details.
 | Scale-down policy | 10 Pods / 150s |
 | Metric source | External (`wva_desired_replicas`) |
 
+## How to Run
+
+Benchmarks are driven by the [`llm-d-benchmark`](https://github.com/llm-d/llm-d-benchmark) CLI (`llmdbenchmark`) and are
+integrated via `make` targets. You need an active `kubectl`/`oc` context pointing at your cluster before you start.
+
+### Prerequisites
+
+Clone the benchmark harness and install the CLI (done once per machine):
+
+```bash
+make benchmark-install
+```
+
+### Running Benchmarks
+
+| Step | Command | Description |
+|------|---------|-------------|
+| 1. Stand up | `make benchmark-standup BENCHMARK_NAMESPACE=<ns>` | Deploys the inference stack and load-generator infrastructure |
+| 2. Run a scenario | `make benchmark-run BENCHMARK_NAMESPACE=<ns> BENCHMARK_WORKLOAD=<scenario>.yaml` | Runs a single scenario (default: `prefill_heavy.yaml`) |
+| 3. Tear down | `make benchmark-teardown BENCHMARK_NAMESPACE=<ns>` | Removes all benchmark infrastructure |
+
+Available `BENCHMARK_WORKLOAD` values: `prefill_heavy.yaml`, `decode_heavy.yaml`, `symmetrical.yaml`.
+
+**Run all three scenarios in sequence (standup → run each → teardown):**
+
+```bash
+make benchmark-full BENCHMARK_NAMESPACE=<ns>
+```
+
+**Run an individual scenario manually:**
+
+```bash
+make benchmark-standup BENCHMARK_NAMESPACE=<ns>
+make benchmark-run     BENCHMARK_NAMESPACE=<ns> BENCHMARK_WORKLOAD=prefill_heavy.yaml
+make benchmark-run     BENCHMARK_NAMESPACE=<ns> BENCHMARK_WORKLOAD=decode_heavy.yaml
+make benchmark-run     BENCHMARK_NAMESPACE=<ns> BENCHMARK_WORKLOAD=symmetrical.yaml
+make benchmark-teardown BENCHMARK_NAMESPACE=<ns>
+```
+
+Results for each run are saved in a timestamped workspace directory at the repository root
+(e.g. `<username>-YYYYMMDD-HHMMSS-NNN/results/`).
+
+---
+
 ## Prefill Heavy Scenario
 
 **llm-d Release:** v0.6.0
-**Model:** meta-llama/Llama-3.1-8B-Instruct
+**Model:** Qwen/Qwen3-32B
 **Workload:** 4000 prompt tokens, 1000 output tokens, 20 RPS, 600s duration
 **Saturation Engine:** Default(v1), Tuned(v1)
 
 | Metric | WVA v0.6.0 Default(v1) | WVA v0.6.0 Tuned(v1) (prefill) |
-|--------|----------------|------------------------|
-| P99 TTFT (ms) | _TBD_ | _TBD_ |
-| P99 ITL (ms) | _TBD_ | _TBD_ |
-| Avg replicas | _TBD_ | _TBD_ |
-| Max replicas | _TBD_ | _TBD_ |
-| Avg KV cache utilization | _TBD_ | _TBD_ |
-| Avg queue depth (EPP) | _TBD_ | _TBD_ |
-| Error count | _TBD_ | _TBD_ |
+|--------|------------------------|--------------------------------|
+| P99 TTFT (ms) | 98,810 | _TBD_ |
+| P99 ITL (ms/token) | 55.06 | _TBD_ |
+| Avg replicas | 1.68 | _TBD_ |
+| Max replicas | 3 | _TBD_ |
+| Avg KV cache utilization | 65.1% | _TBD_ |
+| Avg queue depth (EPP) | 236.8 | _TBD_ |
+| Error count | 4,186 / 4,882 | _TBD_ |
 | Cost (avg replicas × GPU/hr) | _TBD_ | _TBD_ |
 
 ## Decode Heavy Scenario
@@ -73,10 +117,10 @@ Summary of WVA benchmark runs with configuration details.
 **Workload:** 1000 prompt tokens, 4000 output tokens, 20 RPS, 600s duration
 **Saturation Engine:** Default(v1), Tuned(v1)
 
-| Metric |WVA v0.6.0 Default(v1) | WVA v0.6.0 Tuned(v1) (decode) |
-|--------|----------------|------------------------|
+| Metric | WVA v0.6.0 Default(v1) | WVA v0.6.0 Tuned(v1) (decode) |
+|--------|------------------------|-------------------------------|
 | P99 TTFT (ms) | _TBD_ | _TBD_ |
-| P99 ITL (ms) | _TBD_ | _TBD_ |
+| P99 ITL (ms/token) | _TBD_ | _TBD_ |
 | Avg replicas | _TBD_ | _TBD_ |
 | Max replicas | _TBD_ | _TBD_ |
 | Avg KV cache utilization | _TBD_ | _TBD_ |
@@ -92,9 +136,9 @@ Summary of WVA benchmark runs with configuration details.
 **Saturation Engine:** Default(v1)
 
 | Metric | WVA v0.6.0 Default(v1) |
-|--------|----------------|
+|--------|------------------------|
 | P99 TTFT (ms) | _TBD_ |
-| P99 ITL (ms) | _TBD_ |
+| P99 ITL (ms/token) | _TBD_ |
 | Avg replicas | _TBD_ |
 | Max replicas | _TBD_ |
 | Avg KV cache utilization | _TBD_ |
