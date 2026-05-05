@@ -50,45 +50,37 @@ Summary of WVA benchmark runs with configuration details.
 
 ## How to Run
 
-Benchmarks are driven by the [`llm-d-benchmark`](https://github.com/llm-d/llm-d-benchmark) CLI (`llmdbenchmark`) and are
-integrated via `make` targets. You need an active `kubectl`/`oc` context pointing at your cluster before you start.
+> **Prerequisites:** Active `kubectl`/`oc` context pointing at your cluster.
 
-### Prerequisites
-
-Clone the benchmark harness and install the CLI (done once per machine):
+**Step 1 — Install the benchmark CLI** (once per machine):
 
 ```bash
 make benchmark-install
 ```
 
-### Running Benchmarks
-
-| Step | Command | Description |
-|------|---------|-------------|
-| 1. Stand up | `make benchmark-standup BENCHMARK_NAMESPACE=<ns>` | Deploys the inference stack and load-generator infrastructure |
-| 2. Run a scenario | `make benchmark-run BENCHMARK_NAMESPACE=<ns> BENCHMARK_WORKLOAD=<scenario>.yaml` | Runs a single scenario (default: `prefill_heavy.yaml`) |
-| 3. Tear down | `make benchmark-teardown BENCHMARK_NAMESPACE=<ns>` | Removes all benchmark infrastructure |
-
-Available `BENCHMARK_WORKLOAD` values: `prefill_heavy.yaml`, `decode_heavy.yaml`, `symmetrical.yaml`.
-
-**Run all three scenarios in sequence (standup → run each → teardown):**
+**Step 2 — Stand up the benchmark environment:**
 
 ```bash
-make benchmark-full BENCHMARK_NAMESPACE=<ns>
+make benchmark-standup BENCHMARK_NAMESPACE=<your-namespace>
 ```
 
-**Run an individual scenario manually:**
+**Step 3 — Run a scenario:**
 
 ```bash
-make benchmark-standup BENCHMARK_NAMESPACE=<ns>
-make benchmark-run     BENCHMARK_NAMESPACE=<ns> BENCHMARK_WORKLOAD=prefill_heavy.yaml
-make benchmark-run     BENCHMARK_NAMESPACE=<ns> BENCHMARK_WORKLOAD=decode_heavy.yaml
-make benchmark-run     BENCHMARK_NAMESPACE=<ns> BENCHMARK_WORKLOAD=symmetrical.yaml
-make benchmark-teardown BENCHMARK_NAMESPACE=<ns>
+make benchmark-run BENCHMARK_NAMESPACE=<your-namespace> BENCHMARK_WORKLOAD=prefill_heavy.yaml
 ```
 
-Results for each run are saved in a timestamped workspace directory at the repository root
-(e.g. `<username>-YYYYMMDD-HHMMSS-NNN/results/`).
+Repeat with `decode_heavy.yaml` or `symmetrical.yaml` for the other scenarios.
+
+**Step 4 — Tear down when done:**
+
+```bash
+make benchmark-teardown BENCHMARK_NAMESPACE=<your-namespace>
+```
+
+Results are saved automatically in a timestamped directory at the repo root (e.g. `<username>-YYYYMMDD-HHMMSS/results/`).
+
+> **Tip:** To run all three scenarios in one command: `make benchmark-full BENCHMARK_NAMESPACE=<your-namespace>`
 
 ---
 
