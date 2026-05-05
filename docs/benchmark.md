@@ -113,25 +113,25 @@ Results for each run are saved in a timestamped workspace directory at the repos
 ## Decode Heavy Scenario
 
 **llm-d Release:** v0.6.0
-**Model:** meta-llama/Llama-3.1-8B-Instruct
+**Model:** Qwen/Qwen3-32B
 **Workload:** 1000 prompt tokens, 4000 output tokens, 20 RPS, 600s duration
 **Saturation Engine:** Default(v1), Tuned(v1)
 
 | Metric | WVA v0.6.0 Default(v1) | WVA v0.6.0 Tuned(v1) (decode) |
 |--------|------------------------|-------------------------------|
-| P99 TTFT (ms) | _TBD_ | _TBD_ |
-| P99 ITL (ms/token) | _TBD_ | _TBD_ |
-| Avg replicas | _TBD_ | _TBD_ |
-| Max replicas | _TBD_ | _TBD_ |
-| Avg KV cache utilization | _TBD_ | _TBD_ |
-| Avg queue depth (EPP) | _TBD_ | _TBD_ |
-| Error count | _TBD_ | _TBD_ |
+| P99 TTFT (ms) | 85,612 | _TBD_ |
+| P99 ITL (ms/token) | 47.09 | _TBD_ |
+| Avg replicas | 1.73 | _TBD_ |
+| Max replicas | 3 | _TBD_ |
+| Avg KV cache utilization | 88.8% | _TBD_ |
+| Avg queue depth (EPP) | 111.8 | _TBD_ |
+| Error count | 3,506 / 4,105 | _TBD_ |
 | Cost (avg replicas × GPU/hr) | _TBD_ | _TBD_ |
 
 ## Symmetrical Scenario
 
 **llm-d Release:** v0.6.0
-**Model:** meta-llama/Llama-3.1-8B-Instruct
+**Model:** Qwen/Qwen3-32B
 **Workload:** 1000 prompt tokens, 1000 output tokens, 20 RPS, 600s duration
 **Saturation Engine:** Default(v1)
 
