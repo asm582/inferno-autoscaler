@@ -137,11 +137,11 @@ Results for each run are saved in a timestamped workspace directory at the repos
 
 | Metric | WVA v0.6.0 Default(v1) |
 |--------|------------------------|
-| P99 TTFT (ms) | _TBD_ |
-| P99 ITL (ms/token) | _TBD_ |
-| Avg replicas | _TBD_ |
-| Max replicas | _TBD_ |
-| Avg KV cache utilization | _TBD_ |
-| Avg queue depth (EPP) | _TBD_ |
-| Error count | _TBD_ |
+| P99 TTFT (ms) | 101,083 |
+| P99 ITL (ms/token) | 67.61 |
+| Avg replicas | 1.70 |
+| Max replicas | 3 |
+| Avg KV cache utilization | 66.7% |
+| Avg queue depth (EPP) | 135.1 |
+| Error count | 3,773 / 4,839 |
 | Cost (avg replicas × GPU/hr) | _TBD_ |
