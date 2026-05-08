@@ -465,6 +465,25 @@ benchmark-run: ## Run a single benchmark workload (set BENCHMARK_NAMESPACE=<name
 		-w $(BENCHMARK_WORKLOAD) \
 		$(if $(filter true,$(BENCHMARK_MONITORING)),--monitoring,)
 
+BURSTY_WORKLOAD ?= bursty.yaml.in
+
+.PHONY: benchmark-run-bursty
+benchmark-run-bursty: ## Run bursty traffic benchmark using inference-perf multi-stage rates (set BENCHMARK_NAMESPACE=<namespace>)
+	@if [ -z "$(BENCHMARK_NAMESPACE)" ]; then \
+		echo "ERROR: BENCHMARK_NAMESPACE is required. Usage: make benchmark-run-bursty BENCHMARK_NAMESPACE=<namespace>"; \
+		exit 1; \
+	fi
+	@if [ -f "$(BENCHMARK_SCENARIOS_DIR)/$(BURSTY_WORKLOAD)" ]; then \
+		cp "$(BENCHMARK_SCENARIOS_DIR)/$(BURSTY_WORKLOAD)" \
+		   "$(BENCHMARK_REPO_DIR)/workload/profiles/inference-perf/$(BURSTY_WORKLOAD)"; \
+	fi
+	$(LLMDBENCHMARK) $(BENCHMARK_CLI_FLAGS) run \
+		-p $(BENCHMARK_NAMESPACE) \
+		-l inference-perf \
+		-w $(BURSTY_WORKLOAD) \
+		-U http://infra-llmdbench-inference-gateway-istio.$(BENCHMARK_NAMESPACE).svc.cluster.local:80 \
+		$(if $(filter true,$(BENCHMARK_MONITORING)),--monitoring,)
+
 .PHONY: benchmark-run-all
 benchmark-run-all: ## Run all scenarios: teardown → standup → run per scenario (set BENCHMARK_NAMESPACE=<namespace>)
 	@if [ -z "$(BENCHMARK_NAMESPACE)" ]; then \
