@@ -465,7 +465,7 @@ benchmark-run: ## Run a single benchmark workload (set BENCHMARK_NAMESPACE=<name
 		-w $(BENCHMARK_WORKLOAD) \
 		$(if $(filter true,$(BENCHMARK_MONITORING)),--monitoring,)
 
-BURSTY_WORKLOAD ?= bursty.yaml.in
+BURSTY_WORKLOAD ?= bursty.yaml
 
 .PHONY: benchmark-run-bursty
 benchmark-run-bursty: ## Run bursty traffic benchmark using inference-perf multi-stage rates (set BENCHMARK_NAMESPACE=<namespace>)
