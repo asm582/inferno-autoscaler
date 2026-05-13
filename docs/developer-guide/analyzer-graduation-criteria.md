@@ -4,7 +4,7 @@ This document defines the benchmark-based graduation criteria for introducing a 
 
 ## Reference Workloads
 
-Every candidate analyzer must be benchmarked against all three canonical workload profiles. Results from a subset are insufficient for graduation.
+Every candidate analyze in WVA must be benchmarked against all three canonical workload profiles or create new profiles relevant to analyzer's behavior. Benchmarking should be done using llmd components by installing Gateway and the scheduler on GPU cluster.
 
 | Scenario | Input Tokens | Output Tokens | Request Rate | Duration |
 |---|---|---|---|---|
@@ -21,7 +21,7 @@ Benchmark results are only comparable when run under identical conditions:
 - **Load generator**: GuideLLM or inference-perf with Poisson arrival profile
 - **HPA settings**: As documented in the HPA Configuration section of `docs/benchmark.md`
 
-Results collected under different hardware, models, or load patterns are informational but do not count toward graduation.
+Results collected under different hardware, models, or load patterns are informational but may not count toward graduation.
 
 ## Measured Metrics
 
@@ -39,15 +39,15 @@ The following metrics are collected for each benchmark run:
 
 ## Graduation Bar
 
-A new analyzer **graduates** (is accepted into the codebase as an available option) when it meets **all** of the following conditions across **all three** workload profiles:
+A new analyzer **graduates** (is accepted into the codebase as an production option) when it meets **all** of the following conditions across **all three** workload profiles:
 
 ### 1. No latency regression
 
-P99 TTFT and P99 ITL must be **< the current default analyzer's baseline** in each scenario. An analyzer that improves one scenario but regresses another does not pass.
+P99 TTFT and P99 ITL must be **< the current default analyzer's baseline** in relevant scenarios. An analyzer that improves one scenario but regresses another may not pass.
 
 ### 2. No error rate regression
 
-The error rate (failed requests / total requests) must be **≤ the current default's baseline** in each scenario.
+The error rate (failed requests / total requests) must be **≤ the current default's baseline** in relevant scenario(s).
 
 ### 3. Cost efficiency within bounds
 
@@ -59,7 +59,7 @@ Average queue depth must **not exceed the current default by more than 20%**. Hi
 
 ### 5. All scenarios required
 
-Results must be reported for prefill-heavy, decode-heavy, **and** symmetrical workloads. Cherry-picking a favorable scenario is not permitted.
+Results must be reported for prefill-heavy, decode-heavy, **and** symmetrical workloads. Cherry-picking a favorable scenario may not be permitted.
 
 ## Promotion to Default
 
