@@ -2,7 +2,7 @@
 
 Quick start guide for local development using Kind (Kubernetes in Docker) with emulated GPU resources.
 
-> **Note**: This guide covers Kind-specific deployment for local testing. For a complete overview of deployment methods, Helm chart configuration, and the full configuration reference, see the [main deployment guide](../README.md).
+> **Note**: This guide covers Kind-specific deployment for local testing. For a complete overview of deployment methods and the full configuration reference, see the [main deployment guide](../README.md).
 
 ## Table of Contents
 

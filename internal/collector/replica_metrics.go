@@ -68,17 +68,15 @@ import (
 // ReplicaMetricsCollector collects replica-level metrics for both saturation
 // analysis and queueing model analysis using the source infrastructure.
 type ReplicaMetricsCollector struct {
-	source      source.MetricsSource
-	k8sClient   client.Client
-	podVAMapper *source.PodVAMapper
+	source    source.MetricsSource
+	k8sClient client.Client
 }
 
 // NewReplicaMetricsCollector creates a new replica metrics collector.
 func NewReplicaMetricsCollector(metricsSource source.MetricsSource, k8sClient client.Client) *ReplicaMetricsCollector {
 	return &ReplicaMetricsCollector{
-		source:      metricsSource,
-		k8sClient:   k8sClient,
-		podVAMapper: source.NewPodVAMapper(k8sClient),
+		source:    metricsSource,
+		k8sClient: k8sClient,
 	}
 }
 
@@ -158,6 +156,7 @@ func (c *ReplicaMetricsCollector) CollectReplicaMetrics(
 	// podMetricData holds per-pod metric values and timestamps
 	type podMetricData struct {
 		podName        string // Actual pod name for K8s API lookups
+		vaName         string // VariantAutoscaling name extracted from llm_d_ai_variant label
 		kvUsage        float64
 		kvTimestamp    time.Time
 		hasKv          bool
@@ -228,14 +227,18 @@ func (c *ReplicaMetricsCollector) CollectReplicaMetrics(
 		trackTimestamp(data.avgITLTimestamp)
 	}
 
-	// Helper function to build consistent instance key from labels
+	// Helper function to build consistent instance key from labels and extract VA name
 	// Prefers pod_name:port format for consistency with scheduler metrics
 	// Falls back to instance (IP:port) if pod_name is not available
-	buildInstanceKey := func(labels map[string]string) (string, string) {
+	// Also extracts the VariantAutoscaling name from the llm_d_ai_variant label
+	buildInstanceKey := func(labels map[string]string) (string, string, string) {
 		podName := labels["pod"]
 		if podName == "" {
 			podName = labels["pod_name"]
 		}
+
+		// Extract VA name from llm_d_ai_variant label (propagated by ServiceMonitor)
+		vaName := labels[constants.VariantLabelPrometheusKey]
 
 		// Try to extract port from instance label (IP:port format)
 		instance := labels["instance"]
@@ -259,10 +262,10 @@ func (c *ReplicaMetricsCollector) CollectReplicaMetrics(
 			// Fallback to just pod name if no port available
 			instanceKey = podName
 		default:
-			return "", ""
+			return "", "", ""
 		}
 
-		return instanceKey, podName
+		return instanceKey, podName, vaName
 	}
 
 	// Extract per-pod metrics from results
@@ -274,7 +277,7 @@ func (c *ReplicaMetricsCollector) CollectReplicaMetrics(
 			return nil, fmt.Errorf("KV cache query failed: %w", result.Error)
 		}
 		for _, value := range result.Values {
-			instanceKey, podName := buildInstanceKey(value.Labels)
+			instanceKey, podName, vaName := buildInstanceKey(value.Labels)
 			if instanceKey == "" {
 				continue
 			}
@@ -282,6 +285,7 @@ func (c *ReplicaMetricsCollector) CollectReplicaMetrics(
 			if podData[instanceKey] == nil {
 				podData[instanceKey] = &podMetricData{
 					podName: podName,
+					vaName:  vaName,
 				}
 			}
 			podData[instanceKey].kvUsage = value.Value
@@ -302,7 +306,7 @@ func (c *ReplicaMetricsCollector) CollectReplicaMetrics(
 			return nil, fmt.Errorf("queue length query failed: %w", result.Error)
 		}
 		for _, value := range result.Values {
-			instanceKey, podName := buildInstanceKey(value.Labels)
+			instanceKey, podName, vaName := buildInstanceKey(value.Labels)
 			if instanceKey == "" {
 				continue
 			}
@@ -310,6 +314,7 @@ func (c *ReplicaMetricsCollector) CollectReplicaMetrics(
 			if podData[instanceKey] == nil {
 				podData[instanceKey] = &podMetricData{
 					podName: podName,
+					vaName:  vaName,
 				}
 			}
 			podData[instanceKey].queueLen = int(value.Value)
@@ -327,7 +332,7 @@ func (c *ReplicaMetricsCollector) CollectReplicaMetrics(
 	if result := results[registration.QueryCacheConfigInfo]; result != nil {
 		if !result.HasError() {
 			for _, value := range result.Values {
-				instanceKey, podName := buildInstanceKey(value.Labels)
+				instanceKey, podName, vaName := buildInstanceKey(value.Labels)
 				if instanceKey == "" {
 					continue
 				}
@@ -335,6 +340,7 @@ func (c *ReplicaMetricsCollector) CollectReplicaMetrics(
 				if podData[instanceKey] == nil {
 					podData[instanceKey] = &podMetricData{
 						podName: podName,
+						vaName:  vaName,
 					}
 				}
 
@@ -367,7 +373,7 @@ func (c *ReplicaMetricsCollector) CollectReplicaMetrics(
 	if result := results[registration.QueryAvgOutputTokens]; result != nil {
 		if !result.HasError() {
 			for _, value := range result.Values {
-				instanceKey, podName := buildInstanceKey(value.Labels)
+				instanceKey, podName, vaName := buildInstanceKey(value.Labels)
 				if instanceKey == "" {
 					continue
 				}
@@ -375,6 +381,7 @@ func (c *ReplicaMetricsCollector) CollectReplicaMetrics(
 				if podData[instanceKey] == nil {
 					podData[instanceKey] = &podMetricData{
 						podName: podName,
+						vaName:  vaName,
 					}
 				}
 				// NaN check: rate division by zero produces NaN
@@ -390,7 +397,7 @@ func (c *ReplicaMetricsCollector) CollectReplicaMetrics(
 	if result := results[registration.QueryAvgInputTokens]; result != nil {
 		if !result.HasError() {
 			for _, value := range result.Values {
-				instanceKey, podName := buildInstanceKey(value.Labels)
+				instanceKey, podName, vaName := buildInstanceKey(value.Labels)
 				if instanceKey == "" {
 					continue
 				}
@@ -398,6 +405,7 @@ func (c *ReplicaMetricsCollector) CollectReplicaMetrics(
 				if podData[instanceKey] == nil {
 					podData[instanceKey] = &podMetricData{
 						podName: podName,
+						vaName:  vaName,
 					}
 				}
 				// NaN check: rate division by zero produces NaN
@@ -413,7 +421,7 @@ func (c *ReplicaMetricsCollector) CollectReplicaMetrics(
 	if result := results[registration.QueryPrefixCacheHitRate]; result != nil {
 		if !result.HasError() {
 			for _, value := range result.Values {
-				instanceKey, podName := buildInstanceKey(value.Labels)
+				instanceKey, podName, vaName := buildInstanceKey(value.Labels)
 				if instanceKey == "" {
 					continue
 				}
@@ -421,6 +429,7 @@ func (c *ReplicaMetricsCollector) CollectReplicaMetrics(
 				if podData[instanceKey] == nil {
 					podData[instanceKey] = &podMetricData{
 						podName: podName,
+						vaName:  vaName,
 					}
 				}
 				// NaN check: rate division by zero produces NaN when no prefix cache queries
@@ -483,7 +492,7 @@ func (c *ReplicaMetricsCollector) CollectReplicaMetrics(
 	if result := results[registration.QueryAvgTTFT]; result != nil {
 		if !result.HasError() {
 			for _, value := range result.Values {
-				instanceKey, podName := buildInstanceKey(value.Labels)
+				instanceKey, podName, vaName := buildInstanceKey(value.Labels)
 				if instanceKey == "" {
 					continue
 				}
@@ -491,6 +500,7 @@ func (c *ReplicaMetricsCollector) CollectReplicaMetrics(
 				if podData[instanceKey] == nil {
 					podData[instanceKey] = &podMetricData{
 						podName: podName,
+						vaName:  vaName,
 					}
 				}
 				if !math.IsNaN(value.Value) && !math.IsInf(value.Value, 0) && value.Value > 0 {
@@ -510,7 +520,7 @@ func (c *ReplicaMetricsCollector) CollectReplicaMetrics(
 	if result := results[registration.QueryAvgITL]; result != nil {
 		if !result.HasError() {
 			for _, value := range result.Values {
-				instanceKey, podName := buildInstanceKey(value.Labels)
+				instanceKey, podName, vaName := buildInstanceKey(value.Labels)
 				if instanceKey == "" {
 					continue
 				}
@@ -518,6 +528,7 @@ func (c *ReplicaMetricsCollector) CollectReplicaMetrics(
 				if podData[instanceKey] == nil {
 					podData[instanceKey] = &podMetricData{
 						podName: podName,
+						vaName:  vaName,
 					}
 				}
 				if !math.IsNaN(value.Value) && !math.IsInf(value.Value, 0) && value.Value > 0 {
@@ -615,7 +626,7 @@ func (c *ReplicaMetricsCollector) CollectReplicaMetrics(
 	collectedAt := time.Now()
 
 	for instanceKey, data := range podData {
-		// Use the actual pod name (not instance IP:port) for K8s API lookup
+		// Use the actual pod name (not instance IP:port) for logging
 		podName := data.podName
 		if podName == "" {
 			// Fallback: if pod name wasn't extracted from labels, use instanceKey
@@ -623,8 +634,9 @@ func (c *ReplicaMetricsCollector) CollectReplicaMetrics(
 			podName = instanceKey
 		}
 
-		// Match Pod to VariantAutoscaling using indexed lookup
-		vaName := c.podVAMapper.FindVAForPod(ctx, podName, namespace, scaleTargets)
+		// Extract VA name directly from metrics (llm_d_ai_variant label)
+		// This replaces the previous ownership traversal approach
+		vaName := data.vaName
 
 		// Track freshness for metrics in this pod for this variant right away
 		trackMetricFreshness(vaName, data, collectedAt, vaMetricsFreshnessStatus)

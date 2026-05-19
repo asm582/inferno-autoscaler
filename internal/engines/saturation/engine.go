@@ -621,7 +621,7 @@ func (e *Engine) optimizeV2(
 	logger := ctrl.LoggerFrom(ctx)
 
 	// Stage 1: Collect ModelScalingRequests for all models
-	var requests []pipeline.ModelScalingRequest
+	requests := make([]pipeline.ModelScalingRequest, 0, len(modelGroups))
 	// modelReplicaMetrics collects per-model replica metrics for KV token enrichment
 	modelReplicaMetrics := make(map[string][]interfaces.ReplicaMetrics)
 
@@ -1173,12 +1173,17 @@ func (e *Engine) applySaturationDecisions(
 				"variant", vaName)
 		}
 
-		// Fetch latest version from API server to avoid conflicts
+		// Fetch latest version from API server to avoid conflicts.
+		// Synthetic (annotation-sourced) variants have no CRD instance; use the in-memory copy.
 		var updateVa llmdVariantAutoscalingV1alpha1.VariantAutoscaling
-		if err := utils.GetVariantAutoscalingWithBackoff(ctx, e.client, va.Name, va.Namespace, &updateVa); err != nil {
-			logger.Error(err, "Failed to get latest VA from API server",
-				"name", va.Name)
-			continue
+		if utils.IsSynthetic(va) {
+			updateVa = *va.DeepCopy()
+		} else {
+			if err := utils.GetVariantAutoscalingWithBackoff(ctx, e.client, va.Name, va.Namespace, &updateVa); err != nil {
+				logger.Error(err, "Failed to get latest VA from API server",
+					"name", va.Name)
+				continue
+			}
 		}
 
 		// Update CurrentAlloc from local analysis (which has the latest metrics)
@@ -1247,20 +1252,23 @@ func (e *Engine) applySaturationDecisions(
 		if acceleratorName == "" {
 			logger.Info("Skipping status update for VA without accelerator info, but setting MetricsAvailable=False",
 				"variant", vaName, "cacheKey.name", va.Name, "cacheKey.namespace", va.Namespace)
-			// Still set the cache entry so the controller can set MetricsAvailable=False.
-			// This is a partial decision for metrics status only - other fields like
-			// TargetReplicas and AcceleratorName are left at zero values since we don't
-			// have enough information to set them.
-			common.DecisionCache.Set(va.Name, va.Namespace, interfaces.VariantDecision{
-				VariantName:      vaName,
-				Namespace:        va.Namespace,
-				MetricsAvailable: false,
-				MetricsReason:    llmdVariantAutoscalingV1alpha1.ReasonMetricsMissing,
-				MetricsMessage:   llmdVariantAutoscalingV1alpha1.MessageMetricsUnavailable,
-			})
-			// Trigger reconciler to apply the condition
-			common.DecisionTrigger <- event.GenericEvent{
-				Object: &updateVa,
+			// Synthetic variants have no CRD status to patch; skip cache/trigger.
+			if !utils.IsSynthetic(va) {
+				// Still set the cache entry so the controller can set MetricsAvailable=False.
+				// This is a partial decision for metrics status only - other fields like
+				// TargetReplicas and AcceleratorName are left at zero values since we don't
+				// have enough information to set them.
+				common.DecisionCache.Set(va.Name, va.Namespace, interfaces.VariantDecision{
+					VariantName:      vaName,
+					Namespace:        va.Namespace,
+					MetricsAvailable: false,
+					MetricsReason:    llmdVariantAutoscalingV1alpha1.ReasonMetricsMissing,
+					MetricsMessage:   llmdVariantAutoscalingV1alpha1.MessageMetricsUnavailable,
+				})
+				// Trigger reconciler to apply the condition
+				common.DecisionTrigger <- event.GenericEvent{
+					Object: &updateVa,
+				}
 			}
 			continue
 		}
@@ -1346,39 +1354,41 @@ func (e *Engine) applySaturationDecisions(
 			act.RecordSaturationMetrics(ctx, decision)
 		}
 
-		// Update Shared State and Trigger Reconcile via Channel
-		// This avoids any API server interaction from the Engine.
+		// Update Shared State and Trigger Reconcile via Channel.
+		// Synthetic (annotation-sourced) variants have no CRD status to patch;
+		// metric emission above is their sole output, so skip cache/trigger.
+		if !utils.IsSynthetic(va) {
+			// 1. Update Cache
+			// Determine MetricsAvailable status for the cache.
+			// - hasAllocation is true when we successfully collected current replica metrics
+			//   for this variant during this loop (metrics pipeline is working).
+			// - hasDecision is true when the optimizer produced a scaling decision based on
+			//   saturation metrics in this run.
+			// Either condition implies saturation metrics were available and usable.
+			metricsAvailable := hasAllocation || hasDecision
+			metricsReason := llmdVariantAutoscalingV1alpha1.ReasonMetricsMissing
+			metricsMessage := llmdVariantAutoscalingV1alpha1.MessageMetricsUnavailable
+			if metricsAvailable {
+				metricsReason = llmdVariantAutoscalingV1alpha1.ReasonMetricsFound
+				metricsMessage = llmdVariantAutoscalingV1alpha1.MessageMetricsAvailable
+			}
 
-		// 1. Update Cache
-		// Determine MetricsAvailable status for the cache.
-		// - hasAllocation is true when we successfully collected current replica metrics
-		//   for this variant during this loop (metrics pipeline is working).
-		// - hasDecision is true when the optimizer produced a scaling decision based on
-		//   saturation metrics in this run.
-		// Either condition implies saturation metrics were available and usable.
-		metricsAvailable := hasAllocation || hasDecision
-		metricsReason := llmdVariantAutoscalingV1alpha1.ReasonMetricsMissing
-		metricsMessage := llmdVariantAutoscalingV1alpha1.MessageMetricsUnavailable
-		if metricsAvailable {
-			metricsReason = llmdVariantAutoscalingV1alpha1.ReasonMetricsFound
-			metricsMessage = llmdVariantAutoscalingV1alpha1.MessageMetricsAvailable
-		}
+			common.DecisionCache.Set(va.Name, va.Namespace, interfaces.VariantDecision{
+				VariantName:       vaName,
+				Namespace:         va.Namespace,
+				TargetReplicas:    targetReplicas,
+				AcceleratorName:   acceleratorName,
+				LastRunTime:       metav1.Now(),
+				CurrentAllocation: currentAllocations[vaName],
+				MetricsAvailable:  metricsAvailable,
+				MetricsReason:     metricsReason,
+				MetricsMessage:    metricsMessage,
+			})
 
-		common.DecisionCache.Set(va.Name, va.Namespace, interfaces.VariantDecision{
-			VariantName:       vaName,
-			Namespace:         va.Namespace,
-			TargetReplicas:    targetReplicas,
-			AcceleratorName:   acceleratorName,
-			LastRunTime:       metav1.Now(),
-			CurrentAllocation: currentAllocations[vaName],
-			MetricsAvailable:  metricsAvailable,
-			MetricsReason:     metricsReason,
-			MetricsMessage:    metricsMessage,
-		})
-
-		// 2. Trigger Reconciler
-		common.DecisionTrigger <- event.GenericEvent{
-			Object: &updateVa,
+			// 2. Trigger Reconciler
+			common.DecisionTrigger <- event.GenericEvent{
+				Object: &updateVa,
+			}
 		}
 
 		if hasDecision {

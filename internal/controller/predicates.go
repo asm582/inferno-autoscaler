@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/annotations"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/constants"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/datastore"
@@ -140,6 +141,20 @@ func EventFilter() predicate.Funcs {
 		GenericFunc: func(e event.GenericEvent) bool {
 			return false
 		},
+	}
+}
+
+// AnnotatedScalerPredicate passes events only for objects bearing llm-d.ai/managed: "true".
+// For Update events, either old or new object must be managed so that annotation removal
+// reaches handleAnnotatedScalerEvent and triggers the untrack path.
+func AnnotatedScalerPredicate() predicate.Predicate {
+	return predicate.Funcs{
+		CreateFunc: func(e event.CreateEvent) bool { return annotations.IsManaged(e.Object) },
+		DeleteFunc: func(e event.DeleteEvent) bool { return annotations.IsManaged(e.Object) },
+		UpdateFunc: func(e event.UpdateEvent) bool {
+			return annotations.IsManaged(e.ObjectOld) || annotations.IsManaged(e.ObjectNew)
+		},
+		GenericFunc: func(e event.GenericEvent) bool { return annotations.IsManaged(e.Object) },
 	}
 }
 

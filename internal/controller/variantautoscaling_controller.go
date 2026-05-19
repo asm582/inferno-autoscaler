@@ -50,7 +50,8 @@ import (
 // VariantAutoscalingReconciler reconciles a variantAutoscaling object
 type VariantAutoscalingReconciler struct {
 	client.Client
-	Scheme     *runtime.Scheme
+	Scheme *runtime.Scheme
+
 	Recorder   record.EventRecorder
 	Config     *config.Config      // Unified configuration (injected from main.go)
 	Datastore  datastore.Datastore // Datastore for namespace tracking and InferencePool data

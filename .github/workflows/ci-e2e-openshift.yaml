@@ -89,8 +89,10 @@ jobs:
         uses: dorny/paths-filter@v3
         id: filter
         with:
+          predicate-quantifier: 'every'
           filters: |
             code:
+              - '**'
               - '!docs/**'
               - '!README.md'
               - '!CONTRIBUTING.md'
@@ -110,7 +112,7 @@ jobs:
             echo "has_code_changes=true" >> $GITHUB_OUTPUT
           fi
 
-  # Gate: Check permissions and handle /ok-to-test for fork PRs.
+  # Gate: Check permissions and handle /ok-to-test for fork PRs. 
   # - Maintainers (write access): Tests run automatically on pull_request.
   # - Fork PRs: Gate succeeds (no failure) so the PR does not show a false red check; E2E runs
   #   only after a maintainer comments /ok-to-test. Branch protection should require the
@@ -398,20 +400,13 @@ jobs:
       HPA_STABILIZATION_SECONDS: ${{ github.event.inputs.hpa_stabilization_seconds || '240' }}
       SKIP_CLEANUP: ${{ github.event.inputs.skip_cleanup || 'false' }}
       # Pin llm-d release for deterministic CI behavior
-      LLM_D_RELEASE: v0.6.0
+      LLM_D_RELEASE: v0.7.0
       # PR-specific namespaces for isolation between concurrent PR tests
-      # Primary llm-d namespace (Model A1 + A2)
-      LLMD_NAMESPACE: llm-d-inference-scheduler-pr-${{ needs.gate.outputs.pr_number || github.run_id }}
-      # Secondary llm-d namespace (Model B)
-      LLMD_NAMESPACE_B: llm-d-inference-scheduler-pr-${{ needs.gate.outputs.pr_number || github.run_id }}-b
-      # WVA controller namespace (monitors all models)
+      LLMD_NAMESPACE: llm-d-optimized-baseline-pr-${{ needs.gate.outputs.pr_number || github.run_id }}
       WVA_NAMESPACE: llm-d-autoscaler-pr-${{ needs.gate.outputs.pr_number || github.run_id }}
       # Unique release names per run to avoid conflicts
       WVA_RELEASE_NAME: wva-e2e-${{ github.run_id }}
-      # Model A1: Primary deployment in LLMD_NAMESPACE
       MODEL_A1_RELEASE: model-a1-${{ github.run_id }}
-      # Model B: Deployment in LLMD_NAMESPACE_B
-      MODEL_B_RELEASE: model-b-${{ github.run_id }}
       # Use the image built in the previous job
       WVA_IMAGE_TAG: ${{ needs.build-image.outputs.image_tag }}
     steps:
@@ -623,12 +618,11 @@ jobs:
         run: |
           echo "Cleaning up WVA resources for this PR's namespaces only..."
           echo "  LLMD_NAMESPACE: $LLMD_NAMESPACE"
-          echo "  LLMD_NAMESPACE_B: $LLMD_NAMESPACE_B"
           echo "  WVA_NAMESPACE: $WVA_NAMESPACE"
 
-          # Only clean up the 3 namespaces associated with THIS PR
+          # Only clean up the namespaces associated with THIS PR
           # Do NOT touch namespaces from other PRs to avoid race conditions
-          for ns in "$LLMD_NAMESPACE" "$LLMD_NAMESPACE_B" "$WVA_NAMESPACE"; do
+          for ns in "$LLMD_NAMESPACE" "$WVA_NAMESPACE"; do
             if kubectl get namespace "$ns" &>/dev/null; then
               echo ""
               echo "=== Cleaning up namespace: $ns ==="
@@ -649,7 +643,7 @@ jobs:
           done
 
           # Clean up legacy namespaces if they exist (these are not PR-specific)
-          for legacy_ns in llm-d-inference-scheduler workload-variant-autoscaler-system; do
+          for legacy_ns in llm-d-optimized-baseline workload-variant-autoscaler-system; do
             if kubectl get namespace "$legacy_ns" &>/dev/null; then
               echo ""
               echo "=== Cleaning up legacy namespace: $legacy_ns ==="
@@ -694,9 +688,8 @@ jobs:
       - name: Apply latest CRDs
         run: |
           echo "Applying latest VariantAutoscaling CRD..."
-          # Helm doesn't auto-update CRDs, so we need to apply them manually
-          # to ensure the cluster has the latest schema (including scaleTargetRef)
-          kubectl apply -f charts/workload-variant-autoscaler/crds/
+          # Apply CRDs from the Kustomize source of truth (config/crd/bases/)
+          kubectl apply -f config/crd/bases/
 
       - name: Deploy WVA and llm-d infrastructure
         env:
@@ -729,7 +722,7 @@ jobs:
           # queueLength > 0.5, which the simulator produces under load.
           KV_SPARE_TRIGGER: "0.5"
           QUEUE_SPARE_TRIGGER: "4.5"
-          # inference-scheduling guide runs vLLM directly on 8000 (no 8200 routing proxy).
+          # optimized-baseline guide runs vLLM directly on 8000 (no routing proxy sidecar).
           VLLM_SVC_PORT: "8000"
           MODEL_ID: ${{ env.MODEL_ID }}
           ACCELERATOR_TYPE: ${{ env.ACCELERATOR_TYPE }}
@@ -755,25 +748,19 @@ jobs:
           echo "  QUEUE_SPARE_TRIGGER: ${QUEUE_SPARE_TRIGGER:-<default>}"
           echo "  HF token configuration: ✓"
           # Base monitoring + WVA + scaler (install.sh does not deploy llm-d).
-          ./deploy/install.sh --release-name "$WVA_RELEASE_NAME" --environment openshift
+          ./deploy/install.sh --environment openshift
           # Gateway/EPP/ModelService + WVA poolGroup alignment (see deploy/install-llmd-infra.sh).
           ./deploy/install-llmd-infra.sh -e openshift
-          # Capacity thresholds are not passed from install.sh — tune after install for CI simulators.
-          helm upgrade "$WVA_RELEASE_NAME" ./charts/workload-variant-autoscaler -n "$WVA_NS" --reuse-values \
-            --set wva.capacityScaling.default.kvSpareTrigger="${KV_SPARE_TRIGGER}" \
-            --set wva.capacityScaling.default.queueSpareTrigger="${QUEUE_SPARE_TRIGGER}"
-
-      - name: Create secondary namespace for Model B
-        run: |
-          echo "Creating secondary namespace for Model B..."
-          kubectl create namespace "$LLMD_NAMESPACE_B" --dry-run=client -o yaml | kubectl apply -f -
-          echo "Secondary namespace $LLMD_NAMESPACE_B created"
+          # Capacity thresholds are tuned after install via ConfigMap patch for CI simulators.
+          kubectl patch configmap workload-variant-autoscaler-saturation-scaling-config \
+            -n "$WVA_NAMESPACE" --type=merge \
+            -p "$(printf '{"data":{"default":"kvSpareTrigger: %s\\nqueueSpareTrigger: %s\\n"}}' \
+              "${KV_SPARE_TRIGGER}" "${QUEUE_SPARE_TRIGGER}")"
 
       - name: Label namespaces for OpenShift monitoring
         run: |
           echo "Adding openshift.io/user-monitoring label to namespaces for Prometheus scraping..."
           kubectl label namespace "$LLMD_NAMESPACE" openshift.io/user-monitoring=true --overwrite
-          kubectl label namespace "$LLMD_NAMESPACE_B" openshift.io/user-monitoring=true --overwrite
           kubectl label namespace "$WVA_NAMESPACE" openshift.io/user-monitoring=true --overwrite
           echo "Namespace labels applied"
 
@@ -783,15 +770,15 @@ jobs:
           kubectl rollout status deployment -l app.kubernetes.io/name=workload-variant-autoscaler -n "$WVA_NAMESPACE" --timeout=300s || true
           kubectl get pods -n "$WVA_NAMESPACE"
 
-          # Wait for ModelService decode Deployment to exist (helmfile can lag; names can vary slightly by llm-d release).
-          CANONICAL_DECODE="ms-inference-scheduling-llm-d-modelservice-decode"
+          # Wait for model server decode Deployment to exist (Kustomize apply can lag; names derive from guide namePrefix).
+          CANONICAL_DECODE="optimized-baseline-nvidia-gpu-vllm-decode"
           DECODE_DEPLOY=""
           for i in $(seq 1 90); do
             if kubectl get deployment "$CANONICAL_DECODE" -n "$LLMD_NAMESPACE" &>/dev/null; then
               DECODE_DEPLOY="$CANONICAL_DECODE"
               break
             fi
-            DECODE_DEPLOY=$(kubectl get deploy -n "$LLMD_NAMESPACE" -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null | grep -E -- '-decode$' | grep -i modelservice | head -1 || true)
+            DECODE_DEPLOY=$(kubectl get deploy -n "$LLMD_NAMESPACE" -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null | grep -E -- '-decode$' | head -1 || true)
             if [ -n "$DECODE_DEPLOY" ]; then
               break
             fi
@@ -839,143 +826,14 @@ jobs:
           }
           kubectl get pods -n "$LLMD_NAMESPACE"
 
-      - name: Deploy Model B infrastructure in secondary namespace
-        env:
-          # HF_TOKEN is inherited from GITHUB_ENV (same as Model A1).
-          ENVIRONMENT: openshift
-          INSTALL_GATEWAY_CTRLPLANE: "false"
-          SCALER_BACKEND: keda
-          NAMESPACE_SCOPED: "false"
-          # Second llm-d stack — same WVA controller monitors both LLMD_NAMESPACE and LLMD_NAMESPACE_B.
-          LLMD_NS: ${{ env.LLMD_NAMESPACE_B }}
-          WVA_NS: ${{ env.WVA_NAMESPACE }}
-          # install-llmd-infra-only: reuse existing WVA + monitoring from Model A1 (no second controller).
-          DEPLOY_WVA: "false"
-          MODEL_ID: ${{ env.MODEL_ID }}
-          ACCELERATOR_TYPE: ${{ env.ACCELERATOR_TYPE }}
-          VLLM_MAX_NUM_SEQS: ${{ env.MAX_NUM_SEQS }}
-          DECODE_REPLICAS: "1"
-          MONITORING_NAMESPACE: openshift-user-workload-monitoring
-          WVA_METRICS_SECURE: "false"
-          # Match Model A1 (inference-scheduling guide, proxy disabled).
-          VLLM_SVC_PORT: "8000"
-          LLMD_SKIP_DEFAULT_MODELSERVICE: "false"
-          LLMD_WAIT_FOR_ESSENTIAL_LLM_D_ONLY: "true"
-          E2E_DEPLOY_WAIT_TIMEOUT: "300s"
+      - name: Verify deployment
         run: |
-          echo "Deploying Model B infrastructure in $LLMD_NAMESPACE_B..."
-          echo "  MODEL_ID: $MODEL_ID"
-          echo "  ACCELERATOR_TYPE: $ACCELERATOR_TYPE"
-          echo "  VLLM_MAX_NUM_SEQS: $VLLM_MAX_NUM_SEQS"
-          echo "  DECODE_REPLICAS: $DECODE_REPLICAS"
-
-          # llm-d only — no install.sh (would duplicate monitoring/scaler).
-          ./deploy/install-llmd-infra.sh -e openshift
-
-          echo "Waiting for Model B deployment to start (initial rollout)..."
-          # Wait briefly for deployments to be created by helm before checking rollout status
-          sleep 10
-          kubectl get pods -n "$LLMD_NAMESPACE_B"
-
-      - name: Deploy Model B WVA resources
-        env:
-          LLMD_NS: ${{ env.LLMD_NAMESPACE_B }}
-          WVA_NS: ${{ env.WVA_NAMESPACE }}
-          # Use same controller instance as Model A for HPA selector matching
-          CONTROLLER_INSTANCE: ${{ env.WVA_NAMESPACE }}
-        run: |
-          echo "Deploying Model B WVA resources..."
-          echo "  Release name: $MODEL_B_RELEASE"
-          echo "  CONTROLLER_INSTANCE: $CONTROLLER_INSTANCE"
-
-          # Deploy WVA resources (VA, HPA, ServiceMonitor) for Model B
-          # controller.enabled=false since we're using the existing WVA controller
-          # Note: llmd.modelName should be base name without -decode suffix (template appends it)
-          helm upgrade -i "$MODEL_B_RELEASE" ./charts/workload-variant-autoscaler \
-            -n "$WVA_NAMESPACE" \
-            --set controller.enabled=false \
-            --set va.enabled=true \
-            --set hpa.enabled=true \
-            --set hpa.behavior.scaleUp.stabilizationWindowSeconds="$HPA_STABILIZATION_SECONDS" \
-            --set hpa.behavior.scaleDown.stabilizationWindowSeconds="$HPA_STABILIZATION_SECONDS" \
-            --set llmd.namespace="$LLMD_NAMESPACE_B" \
-            --set llmd.modelName="ms-inference-scheduling-llm-d-modelservice" \
-            --set llmd.modelID="$MODEL_ID" \
-            --set va.accelerator="$ACCELERATOR_TYPE" \
-            --set wva.baseName="inference-scheduling" \
-            --set wva.prometheus.monitoringNamespace=openshift-user-workload-monitoring \
-            --set wva.metrics.secure=false \
-            --set vllmService.port=8000 \
-            --set vllmService.targetPort=8000 \
-            --set wva.controllerInstance="$CONTROLLER_INSTANCE"
-
-          echo "Model B WVA resources deployed"
-          kubectl get hpa -n "$LLMD_NAMESPACE_B" -l app.kubernetes.io/instance="$MODEL_B_RELEASE" || true
-          kubectl get variantautoscaling -n "$LLMD_NAMESPACE_B" -l app.kubernetes.io/instance="$MODEL_B_RELEASE" || true
-
-      - name: Wait for Model B to be ready
-        run: |
-          CANONICAL_DECODE="ms-inference-scheduling-llm-d-modelservice-decode"
-          DECODE_DEPLOY=""
-          for i in $(seq 1 90); do
-            if kubectl get deployment "$CANONICAL_DECODE" -n "$LLMD_NAMESPACE_B" &>/dev/null; then
-              DECODE_DEPLOY="$CANONICAL_DECODE"
-              break
-            fi
-            DECODE_DEPLOY=$(kubectl get deploy -n "$LLMD_NAMESPACE_B" -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null | grep -E -- '-decode$' | grep -i modelservice | head -1 || true)
-            if [ -n "$DECODE_DEPLOY" ]; then
-              break
-            fi
-            echo "Waiting for Model B decode Deployment in $LLMD_NAMESPACE_B ($i/90)..."
-            sleep 10
-          done
-          if [ -z "$DECODE_DEPLOY" ]; then
-            echo "::error::No decode Deployment found in $LLMD_NAMESPACE_B"
-            kubectl get deploy -n "$LLMD_NAMESPACE_B" -o wide || true
-            exit 1
-          fi
-          echo "Using Model B decode Deployment: $DECODE_DEPLOY"
-
-          # Same fix as Model A1: ensure replicas > 0 before waiting for rollout
-          DESIRED_REPLICAS="${DECODE_REPLICAS:-1}"
-          CURRENT_REPLICAS=$(kubectl get deployment "$DECODE_DEPLOY" -n "$LLMD_NAMESPACE_B" -o jsonpath='{.spec.replicas}' 2>/dev/null || true)
-          if ! [[ "${CURRENT_REPLICAS:-}" =~ ^[0-9]+$ ]]; then
-            CURRENT_REPLICAS=0
-          fi
-          if [ "${CURRENT_REPLICAS}" -eq 0 ]; then
-            echo "WARNING: Model B deployment has 0 replicas (likely from previous failed run cleanup)"
-            echo "Scaling to $DESIRED_REPLICAS replica(s)..."
-            kubectl scale "deployment/$DECODE_DEPLOY" -n "$LLMD_NAMESPACE_B" --replicas="$DESIRED_REPLICAS" || {
-              echo "ERROR: Failed to scale Model B deployment"
-              exit 1
-            }
-          fi
-
-          echo "Waiting for Model B vLLM deployment to be ready (up to 25 minutes for model loading)..."
-          # Same as Model A1: use rollout status to wait for actual pod readiness.
-          kubectl rollout status "deployment/$DECODE_DEPLOY" -n "$LLMD_NAMESPACE_B" --timeout=1500s || {
-            echo "WARNING: Model B deployment not ready after 25 minutes"
-            echo "=== Pod status ==="
-            kubectl get pods -n "$LLMD_NAMESPACE_B"
-            echo "=== Deployment conditions ==="
-            kubectl get deployment "$DECODE_DEPLOY" -n "$LLMD_NAMESPACE_B" -o jsonpath='{.status.conditions}' | jq . || true
-            echo "=== Recent events ==="
-            kubectl get events -n "$LLMD_NAMESPACE_B" --sort-by='.lastTimestamp' | tail -20
-          }
-
-      - name: Verify multi-model deployment
-        run: |
-          echo "=== Multi-Model Deployment Status ==="
+          echo "=== Deployment Status ==="
           echo ""
-          echo "=== Model A1 (Primary, $LLMD_NAMESPACE) ==="
+          echo "=== Model A1 ($LLMD_NAMESPACE) ==="
           kubectl get deployment -n "$LLMD_NAMESPACE" | grep -E "decode|NAME" || true
           kubectl get hpa -n "$LLMD_NAMESPACE" || true
           kubectl get variantautoscaling -n "$LLMD_NAMESPACE" || true
-          echo ""
-          echo "=== Model B ($LLMD_NAMESPACE_B) ==="
-          kubectl get deployment -n "$LLMD_NAMESPACE_B" | grep -E "decode|NAME" || true
-          kubectl get hpa -n "$LLMD_NAMESPACE_B" || true
-          kubectl get variantautoscaling -n "$LLMD_NAMESPACE_B" || true
           echo ""
           echo "=== WVA Controller ($WVA_NAMESPACE) ==="
           kubectl get pods -n "$WVA_NAMESPACE"
@@ -987,7 +845,7 @@ jobs:
 
           # 1. Verify vLLM pods are serving /metrics endpoint
           echo "--- Step 1: Checking vLLM /metrics endpoint ---"
-          for ns in "$LLMD_NAMESPACE" "$LLMD_NAMESPACE_B"; do
+          for ns in "$LLMD_NAMESPACE"; do
             VLLM_POD=$(kubectl get pods -n "$ns" -l llm-d.ai/inference-serving=true -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
             if [ -n "$VLLM_POD" ]; then
               PORT="${VLLM_SVC_PORT:-8000}"
@@ -1011,7 +869,7 @@ jobs:
           # 1b. Verify vllm-service has endpoints (critical for ServiceMonitor scraping)
           echo ""
           echo "--- Step 1b: Checking vllm-service endpoints ---"
-          for ns in "$LLMD_NAMESPACE" "$LLMD_NAMESPACE_B"; do
+          for ns in "$LLMD_NAMESPACE"; do
             SVC_NAME=$(kubectl get svc -n "$ns" -l app.kubernetes.io/name=workload-variant-autoscaler -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
             if [ -n "$SVC_NAME" ]; then
               ENDPOINTS=$(kubectl get endpoints "$SVC_NAME" -n "$ns" -o jsonpath='{.subsets[*].addresses[*].ip}' 2>/dev/null || true)
@@ -1030,7 +888,7 @@ jobs:
           # 1c. Check PodMonitors (llm-d guide deploys these for direct pod scraping)
           echo ""
           echo "--- Step 1c: PodMonitor configuration ---"
-          for ns in "$LLMD_NAMESPACE" "$LLMD_NAMESPACE_B"; do
+          for ns in "$LLMD_NAMESPACE"; do
             PM_COUNT=$(kubectl get podmonitor -n "$ns" --no-headers 2>/dev/null | wc -l | tr -d ' ')
             echo "  PodMonitors in $ns: $PM_COUNT"
             kubectl get podmonitor -n "$ns" 2>/dev/null || true
@@ -1054,7 +912,7 @@ jobs:
           # 4. Check ServiceMonitors exist
           echo ""
           echo "--- Step 4: ServiceMonitor configuration ---"
-          for ns in "$LLMD_NAMESPACE" "$LLMD_NAMESPACE_B" "$WVA_NAMESPACE"; do
+          for ns in "$LLMD_NAMESPACE" "$WVA_NAMESPACE"; do
             SM_COUNT=$(kubectl get servicemonitor -n "$ns" --no-headers 2>/dev/null | wc -l | tr -d ' ')
             echo "  ServiceMonitors in $ns: $SM_COUNT"
             kubectl get servicemonitor -n "$ns" 2>/dev/null || true
@@ -1104,15 +962,14 @@ jobs:
           # Temporary/ To do: real vLLM decode scheduling was flaky on shared GPU runners; tests use llm-d-inference-sim.
           USE_SIMULATOR: "true"
           SCALE_TO_ZERO_ENABLED: "true"
+          DEPLOY_LWS: "true"
           WVA_NAMESPACE: ${{ env.WVA_NAMESPACE }}
           MONITORING_NAMESPACE: openshift-user-workload-monitoring
           LLMD_NAMESPACE: ${{ env.LLMD_NAMESPACE }}
           # Legacy variables for backward compatibility (if needed by tests)
           CONTROLLER_NAMESPACE: ${{ env.WVA_NAMESPACE }}
-          # Multi-model testing: secondary namespace for Model B
-          LLMD_NAMESPACE_B: ${{ env.LLMD_NAMESPACE_B }}
-          GATEWAY_NAME: infra-inference-scheduling-inference-gateway-istio
-          DEPLOYMENT: ms-inference-scheduling-llm-d-modelservice-decode
+          GATEWAY_NAME: optimized-baseline-inference-gateway-istio
+          DEPLOYMENT: optimized-baseline-nvidia-gpu-vllm-decode
           # Pass WVA_RELEASE_NAME so test can filter for current run's resources
           WVA_RELEASE_NAME: ${{ env.WVA_RELEASE_NAME }}
           # Controller instance label must match what the controller was deployed with
@@ -1128,7 +985,6 @@ jobs:
           echo "  WVA_NAMESPACE: $WVA_NAMESPACE"
           echo "  MONITORING_NAMESPACE: $MONITORING_NAMESPACE"
           echo "  LLMD_NAMESPACE: $LLMD_NAMESPACE"
-          echo "  LLMD_NAMESPACE_B: $LLMD_NAMESPACE_B (multi-model)"
           echo "  DEPLOYMENT: $DEPLOYMENT"
           echo "  GATEWAY_NAME: $GATEWAY_NAME"
           echo "  MODEL_ID: $MODEL_ID"
@@ -1144,86 +1000,44 @@ jobs:
         run: |
           echo "Cleaning up ALL test infrastructure..."
           echo "  LLMD_NAMESPACE: $LLMD_NAMESPACE"
-          echo "  LLMD_NAMESPACE_B: $LLMD_NAMESPACE_B"
           echo "  WVA_NAMESPACE: $WVA_NAMESPACE"
-          echo "  WVA_RELEASE_NAME: $WVA_RELEASE_NAME"
-          echo "  MODEL_B_RELEASE: $MODEL_B_RELEASE"
 
-          # Uninstall all WVA helm releases before deleting namespaces
-          # This ensures proper cleanup of resources and removes helm tracking
-          echo "Uninstalling WVA helm releases..."
-          helm uninstall "$WVA_RELEASE_NAME" -n "$WVA_NAMESPACE" --ignore-not-found --wait --timeout 60s || true
-          helm uninstall "$MODEL_B_RELEASE" -n "$WVA_NAMESPACE" --ignore-not-found --wait --timeout 60s || true
+          echo "Removing cluster-scoped WVA resources..."
+          kubectl delete clusterrole,clusterrolebinding -l app.kubernetes.io/name=workload-variant-autoscaler --ignore-not-found || true
 
-          echo "Uninstalling llm-d helm releases in primary namespace..."
+          echo "Uninstalling llm-d helm releases..."
           for release in $(helm list -n "$LLMD_NAMESPACE" -q 2>/dev/null); do
             echo "  Uninstalling release: $release"
             helm uninstall "$release" -n "$LLMD_NAMESPACE" --ignore-not-found --wait --timeout 60s || true
           done
 
-          echo "Uninstalling llm-d helm releases in secondary namespace..."
-          for release in $(helm list -n "$LLMD_NAMESPACE_B" -q 2>/dev/null); do
-            echo "  Uninstalling release: $release"
-            helm uninstall "$release" -n "$LLMD_NAMESPACE_B" --ignore-not-found --wait --timeout 60s || true
-          done
-
-          # Delete all PR-specific namespaces
           echo "Deleting llm-d namespace $LLMD_NAMESPACE..."
           kubectl delete namespace "$LLMD_NAMESPACE" --ignore-not-found --timeout=120s || true
-
-          echo "Deleting llm-d namespace $LLMD_NAMESPACE_B..."
-          kubectl delete namespace "$LLMD_NAMESPACE_B" --ignore-not-found --timeout=120s || true
 
           echo "Deleting WVA namespace $WVA_NAMESPACE..."
           kubectl delete namespace "$WVA_NAMESPACE" --ignore-not-found --timeout=120s || true
 
-          # Clean up cluster-scoped WVA resources for THIS release only
-          # Use both name and instance labels to avoid deleting resources from other PRs
-          echo "Removing cluster-scoped WVA resources for release $WVA_RELEASE_NAME..."
-          kubectl delete clusterrole,clusterrolebinding -l app.kubernetes.io/name=workload-variant-autoscaler,app.kubernetes.io/instance="$WVA_RELEASE_NAME" --ignore-not-found || true
-
-          # Also clean up cluster-scoped resources owned by this PR's namespaces
-          # (covers helmfile-created resources whose instance label differs from WVA_RELEASE_NAME)
-          for kind in clusterrole clusterrolebinding; do
-            kubectl get "$kind" -o json 2>/dev/null | \
-              jq -r '.items[] | select(.metadata.name | contains("workload-variant-autoscaler")) | "\(.metadata.name)\t\(.metadata.annotations["meta.helm.sh/release-namespace"] // "")"' 2>/dev/null | \
-              while IFS=$'\t' read -r name ns; do
-                if [ "$ns" = "$LLMD_NAMESPACE" ] || [ "$ns" = "$LLMD_NAMESPACE_B" ] || [ "$ns" = "$WVA_NAMESPACE" ]; then
-                  echo "  Deleting $kind/$name (owned by PR namespace '$ns')"
-                  kubectl delete "$kind" "$name" --ignore-not-found || true
-                fi
-              done
-          done
-
           echo "Cleanup complete"
 
-      - name: Dump cluster state
+      - name: Collect cluster diagnostics
         if: always()
         run: |
-          echo "=== Dumping cluster state for diagnostics ==="
-          echo ""
-          echo "=== VAs ==="
-          kubectl get va -n "$LLMD_NAMESPACE" 2>/dev/null || true
-          kubectl get va -n "$LLMD_NAMESPACE_B" 2>/dev/null || true
-          echo ""
-          echo "=== HPAs ==="
-          kubectl get hpa -n "$LLMD_NAMESPACE" 2>/dev/null || true
-          kubectl get hpa -n "$LLMD_NAMESPACE_B" 2>/dev/null || true
-          echo ""
-          echo "=== Controller pods ==="
-          kubectl get pods -n "$WVA_NAMESPACE" 2>/dev/null || true
-          echo ""
-          echo "=== All resources ==="
-          for ns in "$WVA_NAMESPACE" "$LLMD_NAMESPACE" "$LLMD_NAMESPACE_B"; do
+          mkdir -p /tmp/cluster-diagnostics
+          for ns in "$WVA_NAMESPACE" "$LLMD_NAMESPACE"; do
             if kubectl get namespace "$ns" &>/dev/null; then
-              echo "--- Namespace: $ns ---"
-              kubectl get all -n "$ns" 2>/dev/null || true
-              echo ""
-              echo "--- Events in $ns ---"
-              kubectl get events -n "$ns" --sort-by='.lastTimestamp' 2>/dev/null | tail -20 || true
-              echo ""
+              kubectl get va,hpa,all -n "$ns" 2>/dev/null > /tmp/cluster-diagnostics/${ns}-resources.txt || true
+              kubectl get events -n "$ns" --sort-by='.lastTimestamp' 2>/dev/null > /tmp/cluster-diagnostics/${ns}-events.txt || true
+              kubectl logs -n "$ns" -l app.kubernetes.io/name=workload-variant-autoscaler --tail=500 2>/dev/null > /tmp/cluster-diagnostics/${ns}-wva-logs.txt || true
             fi
           done
+
+      - name: Upload cluster diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cluster-diagnostics-${{ github.run_id }}
+          path: /tmp/cluster-diagnostics/
+          retention-days: 7
 
       - name: Scale down GPU workloads on failure
         # On failure, scale down decode deployments to free GPUs while preserving
@@ -1234,7 +1048,7 @@ jobs:
           echo "Other resources (VA, HPA, controller logs) are preserved for debugging"
           echo ""
 
-          for ns in "$LLMD_NAMESPACE" "$LLMD_NAMESPACE_B"; do
+          for ns in "$LLMD_NAMESPACE"; do
             if kubectl get namespace "$ns" &>/dev/null; then
               echo "=== Scaling down decode deployments in $ns ==="
               kubectl scale deployment -n "$ns" -l llm-d.ai/inferenceServing=true --replicas=0 || true

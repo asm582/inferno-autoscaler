@@ -4,6 +4,7 @@ kind: Kustomization
 resources:
 - ../default
 - cluster-monitoring-view-binding.yaml
+- prometheus-adapter-monitoring.yaml
 
 patches:
 - path: configmap-patch.yaml

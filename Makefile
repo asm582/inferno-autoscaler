@@ -9,9 +9,10 @@ CLUSTER_GPUS ?= 4
 KUBECONFIG ?= $(HOME)/.kube/config
 K8S_VERSION ?= v1.32.0
 
+WVA_NS              ?= workload-variant-autoscaler-system
 CONTROLLER_NAMESPACE ?= workload-variant-autoscaler-system
 MONITORING_NAMESPACE ?= openshift-user-workload-monitoring
-LLMD_NAMESPACE       ?= llm-d-inference-scheduler
+LLMD_NAMESPACE       ?= llm-d-optimized-baseline
 GATEWAY_NAME         ?= # discovered automatically in e2es
 MODEL_ID             ?= unsloth/Meta-Llama-3.1-8B
 DEPLOYMENT           ?= # discovered automatically in e2es
@@ -23,19 +24,22 @@ ENVIRONMENT                 ?= kind-emulator
 USE_SIMULATOR               ?= true
 SCALE_TO_ZERO_ENABLED       ?= false
 SCALER_BACKEND              ?= prometheus-adapter  # prometheus-adapter (HPA), keda (ScaledObject), or none (skip, use pre-installed backend)
-LLM_D_RELEASE               ?= v0.6.0
+LLM_D_RELEASE               ?= v0.7.0
 KV_SPARE_TRIGGER           ?=
 QUEUE_SPARE_TRIGGER         ?=
 E2E_MONITORING_NAMESPACE    ?= workload-variant-autoscaler-monitoring
 E2E_EMULATED_LLMD_NAMESPACE ?= llm-d-sim
-E2E_WVA_CHART_PATH          ?= $(CURDIR)/charts/workload-variant-autoscaler
+E2E_WVA_SECONDARY_OVERLAY_PATH ?= $(CURDIR)/test/e2e/testdata/secondary-controller
 # llm-d-benchmark CLI configuration
 BENCHMARK_REPO_URL   ?= https://github.com/llm-d/llm-d-benchmark.git
 BENCHMARK_REPO_DIR   ?= $(CURDIR)/llm-d-benchmark
-# Pin to v0.6.0: v0.6.2 has a broken guidellm harness (missing --target flag, see llm-d/llm-d-benchmark#1231)
+# TODO: verify v0.7.0 benchmark repo fixes llm-d/llm-d-benchmark#1231 (broken guidellm harness in v0.6.2) before bumping
 BENCHMARK_REPO_REF   ?= v0.6.0
+# TODO: verify benchmark repo guide path for v0.7.0 (was guides/inference-scheduling-wva)
 BENCHMARK_SPEC       ?= guides/inference-scheduling-wva
 BENCHMARK_NAMESPACE  ?= # set via BENCHMARK_NAMESPACE=<namespace>
+# TODO: update gateway name pattern after verifying v0.7.0 benchmark guide naming (was infra-<release>-inference-gateway-istio)
+BENCHMARK_GATEWAY_URL ?= http://$(BENCHMARK_NAMESPACE)-inference-gateway-istio.$(BENCHMARK_NAMESPACE).svc.cluster.local:80
 BENCHMARK_WORKSPACE  ?= $(CURDIR)
 BENCHMARK_HARNESS    ?= guidellm
 BENCHMARK_WORKLOAD   ?= prefill_heavy.yaml
@@ -46,13 +50,11 @@ BENCHMARK_SCENARIOS_DIR ?= $(CURDIR)/test/benchmark/scenarios
 BENCHMARK_MODEL_ID   ?= $(MODEL_ID)
 
 # Flags for deploy/install.sh + install-llmd-infra.sh (e2e / CI-style cluster infra; no chart VA/HPA).
-CREATE_CLUSTER ?= false
-DELETE_CLUSTER ?= false
+CREATE_CLUSTER    ?= false
+DELETE_CLUSTER    ?= false
 DELETE_NAMESPACES ?= false
+NAMESPACE_SCOPED  ?= false
 
-# Multi-model deployment configuration (used by deploy-multi-model-infra)
-MODELS           ?= Qwen/Qwen3-0.6B,unsloth/Meta-Llama-3.1-8B
-NAMESPACE_SCOPED ?= false
 
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
 ifeq (,$(shell go env GOBIN))
@@ -140,7 +142,6 @@ deploy-wva-emulated-on-kind: ## Deploy WVA + llm-d on Kind (Prometheus Adapter a
 		LLM_D_RELEASE=$(LLM_D_RELEASE) DECODE_REPLICAS=$(DECODE_REPLICAS) \
 		LLMD_PATCH_EPP_FLOW_CONTROL=true LLMD_SKIP_INFERENCE_OBJECTIVE=true \
 		LLMD_SKIP_DEFAULT_MODELSERVICE=true LLMD_WAIT_FOR_ESSENTIAL_LLM_D_ONLY=true \
-		INSTALL_GATEWAY_CTRLPLANE=true \
 		./deploy/install-llmd-infra.sh -e kind-emulator
 
 ## Undeploy WVA from the emulated environment on Kind.
@@ -157,15 +158,15 @@ undeploy-wva-emulated-on-kind:
 .PHONY: deploy-wva-on-openshift
 deploy-wva-on-openshift: manifests kustomize ## Deploy WVA to OpenShift cluster with specified image.
 	@echo "Deploying WVA to OpenShift with image: $(IMG)"
-	@echo "Target namespace: $(or $(NAMESPACE),workload-variant-autoscaler-system)"
-	NAMESPACE=$(or $(NAMESPACE),workload-variant-autoscaler-system) IMG=$(IMG) ENVIRONMENT=openshift ./deploy/install.sh && \
-	NAMESPACE=$(or $(NAMESPACE),workload-variant-autoscaler-system) IMG=$(IMG) ENVIRONMENT=openshift LLM_D_RELEASE=$(LLM_D_RELEASE) ./deploy/install-llmd-infra.sh -e openshift
+	@echo "Target namespace: $(WVA_NS)"
+	WVA_NS=$(WVA_NS) IMG=$(IMG) ENVIRONMENT=openshift ./deploy/install.sh && \
+	WVA_NS=$(WVA_NS) IMG=$(IMG) ENVIRONMENT=openshift LLM_D_RELEASE=$(LLM_D_RELEASE) ./deploy/install-llmd-infra.sh -e openshift
 
 ## Undeploy WVA from OpenShift.
 .PHONY: undeploy-wva-on-openshift
 undeploy-wva-on-openshift:
 	@echo ">>> Undeploying workload-variant-autoscaler from OpenShift"
-	export KIND=$(KIND) KUBECTL=$(KUBECTL) ENVIRONMENT=openshift && \
+	export KIND=$(KIND) KUBECTL=$(KUBECTL) ENVIRONMENT=openshift WVA_NS=$(WVA_NS) && \
 		deploy/install-llmd-infra.sh --undeploy -e openshift; \
 		deploy/install.sh --undeploy
 
@@ -173,15 +174,15 @@ undeploy-wva-on-openshift:
 .PHONY: deploy-wva-on-k8s
 deploy-wva-on-k8s: manifests kustomize ## Deploy WVA on Kubernetes with the specified image.
 	@echo "Deploying WVA on Kubernetes with image: $(IMG)"
-	@echo "Target namespace: $(or $(NAMESPACE),workload-variant-autoscaler-system)"
-	NAMESPACE=$(or $(NAMESPACE),workload-variant-autoscaler-system) IMG=$(IMG) ENVIRONMENT=kubernetes ./deploy/install.sh && \
-	NAMESPACE=$(or $(NAMESPACE),workload-variant-autoscaler-system) IMG=$(IMG) ENVIRONMENT=kubernetes LLM_D_RELEASE=$(LLM_D_RELEASE) ./deploy/install-llmd-infra.sh -e kubernetes
+	@echo "Target namespace: $(WVA_NS)"
+	WVA_NS=$(WVA_NS) IMG=$(IMG) ENVIRONMENT=kubernetes ./deploy/install.sh && \
+	WVA_NS=$(WVA_NS) IMG=$(IMG) ENVIRONMENT=kubernetes LLM_D_RELEASE=$(LLM_D_RELEASE) ./deploy/install-llmd-infra.sh -e kubernetes
 
 ## Undeploy WVA from Kubernetes.
 .PHONY: undeploy-wva-on-k8s
 undeploy-wva-on-k8s:
 	@echo ">>> Undeploying workload-variant-autoscaler from Kubernetes"
-	export KIND=$(KIND) KUBECTL=$(KUBECTL) ENVIRONMENT=kubernetes && \
+	export KIND=$(KIND) KUBECTL=$(KUBECTL) ENVIRONMENT=kubernetes WVA_NS=$(WVA_NS) && \
 		deploy/install-llmd-infra.sh --undeploy -e kubernetes; \
 		deploy/install.sh --undeploy
 
@@ -237,7 +238,6 @@ deploy-e2e-infra: ## Deploy e2e test infrastructure (WVA + llm-d; no chart VA/HP
 		WVA_IMAGE_PULL_POLICY=IfNotPresent \
 		LLM_D_RELEASE=$(LLM_D_RELEASE) \
 		DECODE_REPLICAS=$(DECODE_REPLICAS) \
-		INSTALL_GATEWAY_CTRLPLANE=true \
 		LLMD_SKIP_DEFAULT_MODELSERVICE=true \
 		LLMD_WAIT_FOR_ESSENTIAL_LLM_D_ONLY=true \
 		LLMD_PATCH_EPP_FLOW_CONTROL=true \
@@ -255,19 +255,18 @@ deploy-e2e-infra: ## Deploy e2e test infrastructure (WVA + llm-d; no chart VA/HP
 		CREATE_CLUSTER=false \
 		LLM_D_RELEASE=$(LLM_D_RELEASE) \
 		DECODE_REPLICAS=$(DECODE_REPLICAS) \
-		INSTALL_GATEWAY_CTRLPLANE=true \
 		LLMD_SKIP_DEFAULT_MODELSERVICE=true \
 		LLMD_WAIT_FOR_ESSENTIAL_LLM_D_ONLY=true \
 		LLMD_PATCH_EPP_FLOW_CONTROL=true \
 		LLMD_SKIP_INFERENCE_OBJECTIVE=true \
 		./deploy/install-llmd-infra.sh -e "$(ENVIRONMENT)"; \
 	fi; \
-	REL=$${WVA_RELEASE_NAME:-workload-variant-autoscaler}; NS=$${WVA_NS:-workload-variant-autoscaler-system}; \
+	NS=$${WVA_NS:-workload-variant-autoscaler-system}; \
 	if [ -n "$(KV_SPARE_TRIGGER)" ] || [ -n "$(QUEUE_SPARE_TRIGGER)" ]; then \
 		echo "Applying optional WVA capacity threshold overrides (KV_SPARE_TRIGGER / QUEUE_SPARE_TRIGGER)..."; \
-		helm upgrade "$$REL" "$(CURDIR)/charts/workload-variant-autoscaler" -n "$$NS" --reuse-values \
-			$(if $(KV_SPARE_TRIGGER),--set wva.capacityScaling.default.kvSpareTrigger=$(KV_SPARE_TRIGGER)) \
-			$(if $(QUEUE_SPARE_TRIGGER),--set wva.capacityScaling.default.queueSpareTrigger=$(QUEUE_SPARE_TRIGGER)); \
+		$(KUBECTL) patch configmap workload-variant-autoscaler-saturation-scaling-config \
+			-n "$$NS" --type=merge \
+			-p "{\"data\":{\"default\":\"kvSpareTrigger: $(KV_SPARE_TRIGGER)\\nqueueSpareTrigger: $(QUEUE_SPARE_TRIGGER)\\n\"}}"; \
 	fi
 
 ## DEPRECATED: prefer ./deploy/install-llmd-infra.sh or upstream llm-d install tooling; kept for Makefile discoverability.
@@ -276,61 +275,6 @@ deploy-e2e-llmd-infra: ## DEPRECATED — runs install-llmd-infra only (run after
 	@echo "DEPRECATED target deploy-e2e-llmd-infra: invoking ./deploy/install-llmd-infra.sh"
 	@ENVIRONMENT=$(ENVIRONMENT) ./deploy/install-llmd-infra.sh -e "$(ENVIRONMENT)"
 
-.PHONY: deploy-e2e-infra-multi-model
-deploy-e2e-infra-multi-model: ## Deploy e2e test infrastructure with two concurrent model services
-	@echo "Deploying multi-model e2e test infrastructure..."
-	./deploy/install-multi-model.sh
-
-# Configurable multi-model deployment for any environment.
-# Usage:
-#   make deploy-multi-model-infra \
-#     ENVIRONMENT=openshift \
-#     WVA_NS=my-namespace LLMD_NS=my-namespace \
-#     NAMESPACE_SCOPED=true \
-#     SKIP_BUILD=true DECODE_REPLICAS=1 \
-#     IMG_TAG=v0.6.0 LLM_D_RELEASE=v0.6.0 \
-#     MODELS="Qwen/Qwen3-0.6B,unsloth/Meta-Llama-3.1-8B"
-.PHONY: deploy-multi-model-infra
-deploy-multi-model-infra: ## Deploy multi-model infra with N models. Set MODELS=m1,m2,... (comma-separated).
-	@echo "Deploying multi-model infrastructure (MODELS=$(MODELS))..."
-	@if [ "$(SKIP_BUILD)" != "true" ]; then \
-		echo "Building WVA image $(IMG)..."; \
-		$(MAKE) docker-build IMG=$(IMG); \
-	else \
-		echo "Skipping image build (SKIP_BUILD=true)"; \
-	fi; \
-	if echo "$(IMG)" | grep -q ":"; then \
-		IMAGE_REPO=$$(echo "$(IMG)" | cut -d: -f1); \
-		IMAGE_TAG=$$(echo "$(IMG)" | cut -d: -f2); \
-	else \
-		IMAGE_REPO="$(IMG)"; \
-		IMAGE_TAG="latest"; \
-	fi; \
-	echo "Using WVA image: $$IMAGE_REPO:$$IMAGE_TAG"; \
-	ENVIRONMENT=$(ENVIRONMENT) \
-	WVA_NS="$(WVA_NS)" \
-	LLMD_NS="$(LLMD_NS)" \
-	NAMESPACE_SCOPED=$(NAMESPACE_SCOPED) \
-	DECODE_REPLICAS=$(DECODE_REPLICAS) \
-	LLM_D_RELEASE=$(LLM_D_RELEASE) \
-	WVA_IMAGE_REPO="$$IMAGE_REPO" \
-	WVA_IMAGE_TAG="$$IMAGE_TAG" \
-	WVA_IMAGE_PULL_POLICY=IfNotPresent \
-	MODELS="$(MODELS)" \
-	./deploy/install-multi-model.sh
-
-# Undeploy multi-model infrastructure.
-# Must use the same MODELS list that was used during deployment.
-.PHONY: undeploy-multi-model-infra
-undeploy-multi-model-infra: ## Undeploy multi-model infra. Use same MODELS=m1,m2,... as deploy.
-	@echo "Undeploying multi-model infrastructure (MODELS=$(MODELS))..."
-	ENVIRONMENT=$(ENVIRONMENT) \
-	WVA_NS="$(WVA_NS)" \
-	LLMD_NS="$(LLMD_NS)" \
-	NAMESPACE_SCOPED=$(NAMESPACE_SCOPED) \
-	DELETE_NAMESPACES=$(DELETE_NAMESPACES) \
-	MODELS="$(MODELS)" \
-	./deploy/install-multi-model.sh --undeploy
 
 
 # Deploy e2e infrastructure with KEDA as scaler backend (installs KEDA, skips Prometheus Adapter).
@@ -345,7 +289,7 @@ test-e2e-smoke: ## Run smoke e2e tests
 	WVA_NAMESPACE=$(CONTROLLER_NAMESPACE) \
 	LLMD_NAMESPACE=$(E2E_EMULATED_LLMD_NAMESPACE) \
 	MONITORING_NAMESPACE=$(E2E_MONITORING_NAMESPACE) \
-	WVA_E2E_CHART_PATH=$${WVA_E2E_CHART_PATH:-$(E2E_WVA_CHART_PATH)} \
+	WVA_E2E_SECONDARY_OVERLAY_PATH=$${WVA_E2E_SECONDARY_OVERLAY_PATH:-$(E2E_WVA_SECONDARY_OVERLAY_PATH)} \
 	USE_SIMULATOR=$(USE_SIMULATOR) \
 	SCALE_TO_ZERO_ENABLED=$(SCALE_TO_ZERO_ENABLED) \
 	SCALER_BACKEND=$(SCALER_BACKEND) \
@@ -368,7 +312,7 @@ test-e2e-full: ## Run full e2e test suite
 	KUBECONFIG=$(KUBECONFIG) \
 	ENVIRONMENT=$(ENVIRONMENT) \
 	WVA_NAMESPACE=$(CONTROLLER_NAMESPACE) \
-	WVA_E2E_CHART_PATH=$${WVA_E2E_CHART_PATH:-$(E2E_WVA_CHART_PATH)} \
+	WVA_E2E_SECONDARY_OVERLAY_PATH=$${WVA_E2E_SECONDARY_OVERLAY_PATH:-$(E2E_WVA_SECONDARY_OVERLAY_PATH)} \
 	USE_SIMULATOR=$(USE_SIMULATOR) \
 	SCALE_TO_ZERO_ENABLED=$(SCALE_TO_ZERO_ENABLED) \
 	SCALER_BACKEND=$(SCALER_BACKEND) \
@@ -391,8 +335,11 @@ test-e2e-smoke-with-setup: deploy-e2e-infra test-e2e-smoke
 
 # Convenience target that deploys infra + runs full test suite.
 # Set DELETE_CLUSTER=true to delete Kind cluster after tests (default: keep cluster for debugging).
+# LWS is installed because the full suite includes LeaderWorkerSet scale-from-zero tests.
 .PHONY: test-e2e-full-with-setup
-test-e2e-full-with-setup: deploy-e2e-infra test-e2e-full
+test-e2e-full-with-setup:
+	DEPLOY_LWS=true $(MAKE) deploy-e2e-infra
+	$(MAKE) test-e2e-full
 
 
 ##@ llm-d-benchmark CLI (standup / run / teardown)
@@ -471,8 +418,7 @@ benchmark-run-bursty: ## Run bursty traffic benchmark using inference-perf multi
 		-p $(BENCHMARK_NAMESPACE) \
 		-l inference-perf \
 		-w $(BURSTY_WORKLOAD) \
-		-U http://infra-llmdbench-inference-gateway-istio.$(BENCHMARK_NAMESPACE).svc.cluster.local:80 \
-		--wait-timeout $(BENCHMARK_WAIT_TIMEOUT) \
+		-U $(BENCHMARK_GATEWAY_URL) \
 		$(if $(BENCHMARK_MODEL_ID),-m $(BENCHMARK_MODEL_ID),) \
 		$(if $(filter true,$(BENCHMARK_MONITORING)),--monitoring,); \
 	rc=$$?; \
@@ -562,7 +508,6 @@ lint-deploy-scripts: ## Run bash -n for deploy/install.sh, deploy/lib/*.sh, and 
 	@echo "Syntax-checking deploy shell scripts..."
 	@bash -n deploy/install.sh
 	@bash -n deploy/install-llmd-infra.sh
-	@bash -n deploy/install-multi-model.sh
 	@for script in deploy/lib/*.sh; do bash -n "$$script"; done
 	@for script in deploy/*/install.sh; do if [ -f "$$script" ]; then bash -n "$$script"; fi; done
 	@for script in deploy/kind-emulator/*.sh; do if [ -f "$$script" ]; then bash -n "$$script"; fi; done

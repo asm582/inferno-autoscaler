@@ -462,7 +462,7 @@ var _ = Describe("Saturation analyzer path and status propagation", Label("full"
 
 		By("Creating model service + service + ServiceMonitor for saturation path test")
 		_ = fixtures.DeleteModelService(ctx, k8sClient, cfg.LLMDNamespace, modelSvcName) // best-effort; CreateModelService fails if deployment exists
-		err = fixtures.CreateModelService(ctx, k8sClient, cfg.LLMDNamespace, modelSvcName, poolName, modelID, cfg.UseSimulator, cfg.MaxNumSeqs)
+		err = fixtures.CreateModelService(ctx, k8sClient, cfg.LLMDNamespace, modelSvcName, poolName, modelID, vaName, cfg.UseSimulator, cfg.MaxNumSeqs)
 		Expect(err).NotTo(HaveOccurred())
 		err = fixtures.EnsureService(ctx, k8sClient, cfg.LLMDNamespace, modelSvcName, modelDecodeDeployment, 8000)
 		Expect(err).NotTo(HaveOccurred())

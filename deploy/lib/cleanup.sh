@@ -49,18 +49,19 @@ undeploy_llm_d_infrastructure() {
         RELEASE="$WELL_LIT_PATH_NAME"
     fi
 
-    # Helm uninstall only needs the release name and namespace — it does not
-    # require the local llm-d clone directory. Always attempt to remove the
-    # releases so cluster resources are cleaned up even when the local repo
-    # has already been deleted or was never cloned.
+    # v0.7.0+: single GAIE standalone chart release ($GUIDE_NAME) replaces the
+    # three-release pattern (infra-*, gaie-*, ms-*). Model server is Kustomize-managed.
     log_info "Removing llm-d core components..."
 
-    helm uninstall "infra-$RELEASE" -n "${LLMD_NS}" 2>/dev/null || \
-        log_warning "llm-d infra components not found or already uninstalled"
-    helm uninstall "gaie-$RELEASE" -n "${LLMD_NS}" 2>/dev/null || \
-        log_warning "llm-d inference-scheduler components not found or already uninstalled"
-    helm uninstall "ms-$RELEASE" -n "${LLMD_NS}" 2>/dev/null || \
-        log_warning "llm-d ModelService components not found or already uninstalled"
+    helm uninstall "$RELEASE" -n "${LLMD_NS}" 2>/dev/null || \
+        log_warning "llm-d GAIE release '$RELEASE' not found or already uninstalled"
+
+    # Remove model server Kustomize resources if the example dir is present.
+    if [ -d "$EXAMPLE_DIR/modelserver" ]; then
+        kubectl delete -k "$EXAMPLE_DIR/modelserver/${INFRA_PROVIDER:-base}" \
+            -n "${LLMD_NS}" --ignore-not-found 2>/dev/null || \
+            log_warning "Model server Kustomize resources not found or already removed"
+    fi
 
     if [ ! -d "$EXAMPLE_DIR" ]; then
         log_warning "llm-d example directory not found, skipping local cleanup"
@@ -90,10 +91,33 @@ undeploy_llm_d_infrastructure() {
 }
 
 undeploy_wva_controller() {
-    log_info "Uninstalling Workload-Variant-Autoscaler (release: $WVA_RELEASE_NAME)..."
+    log_info "Uninstalling Workload-Variant-Autoscaler..."
 
-    helm uninstall "$WVA_RELEASE_NAME" -n "$WVA_NS" 2>/dev/null || \
-        log_warning "Workload-Variant-Autoscaler not found or already uninstalled"
+    local kustomize_overlay
+    if [ "$ENVIRONMENT" = "openshift" ]; then
+        kustomize_overlay="$(cd "$WVA_PROJECT/config/openshift" && pwd)"
+    else
+        kustomize_overlay="$(cd "$WVA_PROJECT/config/default" && pwd)"
+    fi
+
+    local tmp_overlay
+    tmp_overlay=$(mktemp -d)
+    ln -s "$kustomize_overlay" "$tmp_overlay/base"
+    cat > "$tmp_overlay/kustomization.yaml" <<EOF
+namespace: $WVA_NS
+resources:
+- ./base
+EOF
+
+    kubectl delete -k "$tmp_overlay" --ignore-not-found 2>/dev/null || \
+        log_warning "Workload-Variant-Autoscaler resources not found or already removed"
+    rm -rf "$tmp_overlay"
+
+    # Remove the per-deployment ClusterRoleBindings created for shared-cluster isolation.
+    kubectl delete clusterrolebinding "workload-variant-autoscaler-manager-${WVA_NS}" \
+        --ignore-not-found 2>/dev/null || true
+    kubectl delete clusterrolebinding "workload-variant-autoscaler-cluster-monitoring-view-${WVA_NS}" \
+        --ignore-not-found 2>/dev/null || true
 
     rm -f "$PROM_CA_CERT_PATH"
 

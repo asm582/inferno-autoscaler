@@ -26,36 +26,40 @@ BLUE='\033[0;34m'
 NC='\033[0m'
 
 WVA_PROJECT=${WVA_PROJECT:-$PWD}
-# Basename under llm-d guides/ (llm-d calls this GUIDE_NAME). On llm-d main the former
-# inference-scheduling layout lives at guides/optimized-baseline:
-# https://github.com/llm-d/llm-d/tree/main/guides/optimized-baseline
-# Default stays inference-scheduling so pinned LLM_D_RELEASE (e.g. v0.6.0) still finds helmfile + values.
+# Basename under llm-d guides/ (llm-d calls this GUIDE_NAME).
+# v0.7.0+: guides/optimized-baseline replaces the former guides/inference-scheduling.
 if [ -n "${GUIDE_NAME:-}" ]; then
     WELL_LIT_PATH_NAME="$GUIDE_NAME"
 fi
-: "${WELL_LIT_PATH_NAME:=inference-scheduling}"
+: "${WELL_LIT_PATH_NAME:=optimized-baseline}"
 GUIDE_NAME="$WELL_LIT_PATH_NAME"
-NAMESPACE_SUFFIX=${NAMESPACE_SUFFIX:-"inference-scheduler"}
+NAMESPACE_SUFFIX=${NAMESPACE_SUFFIX:-"$GUIDE_NAME"}
 LLMD_NS=${LLMD_NS:-"llm-d-$NAMESPACE_SUFFIX"}
 WVA_NS=${WVA_NS:-"workload-variant-autoscaler-system"}
 MONITORING_NAMESPACE=${MONITORING_NAMESPACE:-"workload-variant-autoscaler-monitoring"}
 
 LLM_D_OWNER=${LLM_D_OWNER:-"llm-d"}
 LLM_D_PROJECT=${LLM_D_PROJECT:-"llm-d"}
-LLM_D_RELEASE=${LLM_D_RELEASE:-"v0.6.0"}
-LLM_D_MODELSERVICE_NAME=${LLM_D_MODELSERVICE_NAME:-"ms-$GUIDE_NAME-llm-d-modelservice"}
-LLM_D_EPP_NAME=${LLM_D_EPP_NAME:-"gaie-$GUIDE_NAME-epp"}
-CLIENT_PREREQ_DIR=${CLIENT_PREREQ_DIR:-"$WVA_PROJECT/$LLM_D_PROJECT/guides/prereq/client-setup"}
+LLM_D_RELEASE=${LLM_D_RELEASE:-"v0.7.0"}
+# v0.7.0+: model server deployed via Kustomize; Deployment name derives from kustomize namePrefix.
+LLM_D_MODELSERVICE_NAME=${LLM_D_MODELSERVICE_NAME:-"$GUIDE_NAME-nvidia-gpu-vllm-decode"}
+# v0.7.0+: EPP Helm release is $GUIDE_NAME (single release via GAIE standalone chart).
+LLM_D_EPP_NAME=${LLM_D_EPP_NAME:-"$GUIDE_NAME-epp"}
+# GAIE chart version; must match the CRD revision installed for the cluster (OpenShift override via GATEWAY_API_INFERENCE_EXTENSION_CRD_REVISION).
+GAIE_VERSION=${GAIE_VERSION:-"v1.5.0"}
+# Kustomize overlay under guides/$GUIDE_NAME/modelserver/ (base or gke).
+INFRA_PROVIDER=${INFRA_PROVIDER:-"base"}
 GATEWAY_PREREQ_DIR=${GATEWAY_PREREQ_DIR:-"$WVA_PROJECT/$LLM_D_PROJECT/guides/prereq/gateway-provider"}
 EXAMPLE_DIR=${EXAMPLE_DIR:-"$WVA_PROJECT/$LLM_D_PROJECT/guides/$GUIDE_NAME"}
-LLM_D_MODELSERVICE_VALUES=${LLM_D_MODELSERVICE_VALUES:-"$EXAMPLE_DIR/ms-$GUIDE_NAME/values.yaml"}
 ITL_AVERAGE_LATENCY_MS=${ITL_AVERAGE_LATENCY_MS:-20}
 TTFT_AVERAGE_LATENCY_MS=${TTFT_AVERAGE_LATENCY_MS:-200}
 ENABLE_SCALE_TO_ZERO=${ENABLE_SCALE_TO_ZERO:-true}
 
 GATEWAY_PROVIDER=${GATEWAY_PROVIDER:-"istio"}
-# Install Gateway control plane via helmfile when true (default). Set false if your cluster already has one.
-INSTALL_GATEWAY_CTRLPLANE="${INSTALL_GATEWAY_CTRLPLANE:-true}"
+# Install Gateway control plane (Istio/kgateway) via helmfile. Only needed for Gateway Mode deployments
+# (inferencepool chart with an external Kubernetes Gateway controller). Standalone Mode (default) bundles
+# its own Envoy proxy and does not require an external gateway controller.
+INSTALL_GATEWAY_CTRLPLANE="${INSTALL_GATEWAY_CTRLPLANE:-false}"
 
 # Model identity and vLLM / ModelService chart tuning (wired into llm-d values or overrides).
 DEFAULT_MODEL_ID=${DEFAULT_MODEL_ID:-"Qwen/Qwen3-0.6B"}

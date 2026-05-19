@@ -19,6 +19,7 @@ resources:
 - metrics_auth_role_binding.yaml
 - prometheus_metrics_auth_role_binding.yaml
 - metrics_reader_role.yaml
+- metrics_reader_role_binding.yaml
 # EPP metrics reader service account with minimal privileges
 - epp_metrics_service_account.yaml
 - epp_metrics_reader_role.yaml

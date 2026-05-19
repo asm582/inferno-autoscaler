@@ -274,7 +274,6 @@ Infrastructure is deployed in **infra-only** mode (WVA + llm-d only); tests crea
 Runs OpenShift E2E tests on dedicated cluster:
 - Triggered manually or on specific labels
 - Deploys PR-specific namespaces
-- Runs multi-model tests
 - On failure: automatically scales down GPU workloads while preserving debugging resources (VA, HPA, logs)
 - Smart resource management frees GPUs for other PRs without manual intervention
 

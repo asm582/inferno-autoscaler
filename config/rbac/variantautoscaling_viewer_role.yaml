@@ -11,12 +11,12 @@ metadata:
   labels:
     app.kubernetes.io/name: workload-variant-autoscaler
     app.kubernetes.io/managed-by: kustomize
-  name: VariantAutoscalings-viewer-role
+  name: variantautoscaling-viewer-role
 rules:
 - apiGroups:
   - llmd.llm-d.ai
   resources:
-  - VariantAutoscalingss
+  - variantautoscalings
   verbs:
   - get
   - list
@@ -24,6 +24,6 @@ rules:
 - apiGroups:
   - llmd.llm-d.ai
   resources:
-  - VariantAutoscalingss/status
+  - variantautoscalings/status
   verbs:
   - get

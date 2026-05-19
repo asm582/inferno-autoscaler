@@ -75,10 +75,26 @@ rules:
   - list
   - watch
 - apiGroups:
+  - autoscaling
+  resources:
+  - horizontalpodautoscalers
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
   - inference.networking.k8s.io
   - inference.networking.x-k8s.io
   resources:
   - inferencepools
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - keda.sh
+  resources:
+  - scaledobjects
   verbs:
   - get
   - list
