@@ -38,8 +38,7 @@ BENCHMARK_REPO_REF   ?= v0.6.0
 # TODO: verify benchmark repo guide path for v0.7.0 (was guides/inference-scheduling-wva)
 BENCHMARK_SPEC       ?= guides/inference-scheduling-wva
 BENCHMARK_NAMESPACE  ?= # set via BENCHMARK_NAMESPACE=<namespace>
-# TODO: update gateway name pattern after verifying v0.7.0 benchmark guide naming (was infra-<release>-inference-gateway-istio)
-BENCHMARK_GATEWAY_URL ?= http://$(BENCHMARK_NAMESPACE)-inference-gateway-istio.$(BENCHMARK_NAMESPACE).svc.cluster.local:80
+BENCHMARK_GATEWAY_URL ?= http://infra-llmdbench-inference-gateway-istio.$(BENCHMARK_NAMESPACE).svc.cluster.local:80
 BENCHMARK_WORKSPACE  ?= $(CURDIR)
 BENCHMARK_HARNESS    ?= guidellm
 BENCHMARK_WORKLOAD   ?= prefill_heavy.yaml
