@@ -48,6 +48,9 @@ BENCHMARK_MONITORING ?= true
 BENCHMARK_UV         ?= false
 BENCHMARK_SCENARIOS_DIR ?= $(CURDIR)/test/benchmark/scenarios
 BENCHMARK_MODEL_ID   ?= $(MODEL_ID)
+BENCHMARK_DIRECT_HPA   ?= false
+BENCHMARK_DECODE_DEPLOY ?= # auto-discovered via *-decode suffix; override if needed
+DIRECT_HPA_MANIFEST    ?= $(CURDIR)/hack/benchmark/run/bypass_wva_direct_hpa.yaml
 
 # Flags for deploy/install.sh + install-llmd-infra.sh (e2e / CI-style cluster infra; no chart VA/HPA).
 CREATE_CLUSTER    ?= false
@@ -367,7 +370,7 @@ benchmark-install: ## Clone llm-d-benchmark at BENCHMARK_REPO_REF (default v0.6.
 	@cd $(BENCHMARK_REPO_DIR) && ./install.sh $(if $(filter true,$(BENCHMARK_UV)),--uv,--no-uv)
 
 .PHONY: benchmark-standup
-benchmark-standup: ## Stand up the benchmark environment (set BENCHMARK_NAMESPACE=<namespace>, MODEL_ID=<model>)
+benchmark-standup: ## Stand up the benchmark environment (set BENCHMARK_NAMESPACE=<namespace>, MODEL_ID=<model>; BENCHMARK_DIRECT_HPA=true to bypass WVA and apply Direct HPA)
 	@if [ -z "$(BENCHMARK_NAMESPACE)" ]; then \
 		echo "ERROR: BENCHMARK_NAMESPACE is required. Usage: make benchmark-standup BENCHMARK_NAMESPACE=<namespace>"; \
 		exit 1; \
@@ -382,7 +385,19 @@ benchmark-standup: ## Stand up the benchmark environment (set BENCHMARK_NAMESPAC
 	rc=$$?; \
 	mv $(BENCHMARK_REPO_DIR)/config/scenarios/guides/inference-scheduling-wva.yaml.bak \
 	   $(BENCHMARK_REPO_DIR)/config/scenarios/guides/inference-scheduling-wva.yaml; \
-	exit $$rc
+	[ $$rc -ne 0 ] && exit $$rc; \
+	if [ "$(BENCHMARK_DIRECT_HPA)" = "true" ]; then \
+		DECODE_DEPLOY="$(BENCHMARK_DECODE_DEPLOY)"; \
+		if [ -z "$$DECODE_DEPLOY" ]; then \
+			DECODE_DEPLOY=$$($(KUBECTL) get deploy -n $(BENCHMARK_NAMESPACE) -o custom-columns=":metadata.name" --no-headers | grep -- "-decode" | head -n 1); \
+		fi; \
+		if [ -z "$$DECODE_DEPLOY" ]; then \
+			echo "ERROR: could not find a *-decode deployment in namespace $(BENCHMARK_NAMESPACE). Set BENCHMARK_DECODE_DEPLOY=<name> to override."; \
+			exit 1; \
+		fi; \
+		echo "Applying Direct HPA targeting decode deployment: $$DECODE_DEPLOY"; \
+		sed "s/TARGET_DEPLOYMENT_NAME/$$DECODE_DEPLOY/g" $(DIRECT_HPA_MANIFEST) | $(KUBECTL) apply -n $(BENCHMARK_NAMESPACE) -f -; \
+	fi
 
 .PHONY: benchmark-run
 benchmark-run: ## Run a single benchmark workload (set BENCHMARK_NAMESPACE=<namespace>, MODEL_ID=<model>)
