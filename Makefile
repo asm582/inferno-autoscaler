@@ -48,6 +48,8 @@ BENCHMARK_MONITORING ?= true
 BENCHMARK_UV         ?= false
 BENCHMARK_SCENARIOS_DIR ?= $(CURDIR)/test/benchmark/scenarios
 BENCHMARK_MODEL_ID   ?= $(MODEL_ID)
+# helm-diff v3.9.x does not support --skip-schema-validation passed by helmfile; ignore it
+export HELM_DIFF_IGNORE_UNKNOWN_FLAGS = true
 
 # Flags for deploy/install.sh (e2e / CI-style cluster infra; no chart VA/HPA).
 CREATE_CLUSTER    ?= false
@@ -352,6 +354,86 @@ benchmark-standup: ## Stand up the benchmark environment (set BENCHMARK_NAMESPAC
 	rc=$$?; \
 	mv $(BENCHMARK_REPO_DIR)/config/scenarios/guides/inference-scheduling-wva.yaml.bak \
 	   $(BENCHMARK_REPO_DIR)/config/scenarios/guides/inference-scheduling-wva.yaml; \
+	exit $$rc
+
+PD_SCENARIO_FILE = $(BENCHMARK_REPO_DIR)/config/scenarios/guides/pd-disaggregation.yaml
+
+.PHONY: benchmark-standup-pd
+benchmark-standup-pd: ## Stand up P/D disaggregation with flowControl feature gate (set BENCHMARK_NAMESPACE=<namespace>, MODEL_ID=<model>)
+	@if [ -z "$(BENCHMARK_NAMESPACE)" ]; then \
+		echo "ERROR: BENCHMARK_NAMESPACE is required. Usage: make benchmark-standup-pd BENCHMARK_NAMESPACE=<namespace>"; \
+		exit 1; \
+	fi
+	@echo "Enabling flowControl feature gate in pd-disaggregation scenario..."
+	@cp $(PD_SCENARIO_FILE) $(PD_SCENARIO_FILE).bak
+	@python3 -c "f='$(PD_SCENARIO_FILE)'; c=open(f).read(); open(f,'w').write(c.replace('featureGates:\n            - prepareDataPlugins','featureGates:\n            - flowControl\n            - prepareDataPlugins',1))"
+	$(LLMDBENCHMARK) --spec guides/pd-disaggregation --workspace $(BENCHMARK_WORKSPACE) --base-dir $(BENCHMARK_REPO_DIR) standup \
+		-p $(BENCHMARK_NAMESPACE) \
+		$(if $(BENCHMARK_MODEL_ID),-m $(BENCHMARK_MODEL_ID),) \
+		$(if $(filter true,$(BENCHMARK_MONITORING)),--monitoring,); \
+	rc=$$?; \
+	mv $(PD_SCENARIO_FILE).bak $(PD_SCENARIO_FILE); \
+	exit $$rc
+
+PD_WVA_PATCH = $(CURDIR)/hack/pd-wva-patch.yaml
+
+.PHONY: benchmark-standup-pd-wva
+benchmark-standup-pd-wva: ## Stand up P/D disaggregation + WVA with flowControl (set BENCHMARK_NAMESPACE=<namespace>, MODEL_ID=<model>)
+	@if [ -z "$(BENCHMARK_NAMESPACE)" ]; then \
+		echo "ERROR: BENCHMARK_NAMESPACE is required. Usage: make benchmark-standup-pd-wva BENCHMARK_NAMESPACE=<namespace>"; \
+		exit 1; \
+	fi
+	@echo "Patching pd-disaggregation with WVA configuration and flowControl feature gate..."
+	@# preserve original for restore on pass or fail
+	@cp $(PD_SCENARIO_FILE) $(PD_SCENARIO_FILE).bak
+	@# deep-merge wva + chartVersions into scenario[0]
+	@yq eval-all 'select(fileIndex == 1) as $$p | select(fileIndex == 0) | .scenario[0] = (.scenario[0] * $$p.scenario[0])' \
+		$(PD_SCENARIO_FILE) $(PD_WVA_PATCH) > $(PD_SCENARIO_FILE).merged
+	@# add named 'metrics' port to each container spec so the PodMonitor port selector resolves.
+	@# decode: vLLM binds to vllm.port (default 8200) — routing proxy fronts on servicePort.
+	@# prefill: vLLM binds to vllm.servicePort (default 8000) — no proxy, binds directly.
+	@# reads from the merged scenario so any custom port overrides in the scenario are respected.
+	@DECODE_PORT=$$(yq '.scenario[0].decode.vllm.port // 8200' $(PD_SCENARIO_FILE).merged); \
+	 PREFILL_PORT=$$(yq '.scenario[0].prefill.vllm.servicePort // 8000' $(PD_SCENARIO_FILE).merged); \
+	 yq -i ".scenario[0].decode.ports = [{\"name\":\"metrics\",\"containerPort\":$${DECODE_PORT},\"protocol\":\"TCP\"}]" \
+	   $(PD_SCENARIO_FILE).merged; \
+	 yq -i ".scenario[0].prefill.ports = [{\"name\":\"metrics\",\"containerPort\":$${PREFILL_PORT},\"protocol\":\"TCP\"}]" \
+	   $(PD_SCENARIO_FILE).merged
+	@# inject flowControl into the existing featureGates list inside the embedded EndpointPickerConfig
+	@# YAML string. yq cannot reach inside opaque string values, so use Python string replace.
+	@python3 -c "f='$(PD_SCENARIO_FILE).merged'; c=open(f).read(); open('$(PD_SCENARIO_FILE)','w').write(c.replace('featureGates:\n            - prepareDataPlugins','featureGates:\n            - flowControl\n            - prepareDataPlugins',1))"
+	@rm -f $(PD_SCENARIO_FILE).merged
+	$(LLMDBENCHMARK) --spec guides/pd-disaggregation --workspace $(BENCHMARK_WORKSPACE) --base-dir $(BENCHMARK_REPO_DIR) standup \
+		-p $(BENCHMARK_NAMESPACE) \
+		$(if $(BENCHMARK_MODEL_ID),-m $(BENCHMARK_MODEL_ID),) \
+		$(if $(filter true,$(BENCHMARK_MONITORING)),--monitoring,); \
+	rc=$$?; \
+	mv $(PD_SCENARIO_FILE).bak $(PD_SCENARIO_FILE); \
+	if [ $$rc -eq 0 ]; then \
+		: llm-d-benchmark has no native support for dual VA/HPA in P/D: the scenario schema \
+		  accepts a single wva: block and the WVA chart hardcodes one decode scale target per \
+		  install. Until both support prefill+decode iteration we clone the decode VA and HPA \
+		  post-standup renaming every -decode string to -prefill so each scales independently; \
+		DECODE_VA=$$(kubectl get va -n $(BENCHMARK_NAMESPACE) -o jsonpath='{.items[0].metadata.name}' 2>/dev/null); \
+		if [ -n "$$DECODE_VA" ]; then \
+			PREFILL_VA=$${DECODE_VA%-decode}-prefill; \
+			DECODE_REPLICAS=$$(yq '.scenario[0].decode.replicas // 1' $(PD_SCENARIO_FILE)); \
+			PREFILL_REPLICAS=$$(yq '.scenario[0].prefill.replicas // 1' $(PD_SCENARIO_FILE)); \
+			for kind in va hpa; do \
+				kubectl get $$kind -n $(BENCHMARK_NAMESPACE) "$$DECODE_VA" -o json \
+					| jq 'del(.metadata.resourceVersion,.metadata.uid,.metadata.creationTimestamp,.metadata.managedFields,.status) | (.. | strings) |= sub("-decode$$";"-prefill")' \
+					| kubectl apply -n $(BENCHMARK_NAMESPACE) -f -; \
+			done; \
+			kubectl patch va -n $(BENCHMARK_NAMESPACE) "$$DECODE_VA" \
+				--type merge -p "{\"spec\":{\"minReplicas\":$${DECODE_REPLICAS}}}"; \
+			kubectl patch hpa -n $(BENCHMARK_NAMESPACE) "$$DECODE_VA" \
+				--type merge -p "{\"spec\":{\"minReplicas\":$${DECODE_REPLICAS}}}"; \
+			kubectl patch va -n $(BENCHMARK_NAMESPACE) "$$PREFILL_VA" \
+				--type merge -p "{\"spec\":{\"minReplicas\":$${PREFILL_REPLICAS}}}"; \
+			kubectl patch hpa -n $(BENCHMARK_NAMESPACE) "$$PREFILL_VA" \
+				--type merge -p "{\"spec\":{\"minReplicas\":$${PREFILL_REPLICAS}}}"; \
+		fi; \
+	fi; \
 	exit $$rc
 
 .PHONY: benchmark-run

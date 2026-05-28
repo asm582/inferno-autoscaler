@@ -1,0 +1,68 @@
+scenario:
+  - wva:
+      enabled: true
+      wellLitPath: pd-disaggregation
+      namespace: ""
+      image:
+        repository: ghcr.io/llm-d/llm-d-workload-variant-autoscaler
+        tag: v0.7.0
+      replicaCount: 1
+      controller:
+        enabled: true
+      namespaceScoped: true
+      metrics:
+        enabled: true
+        port: 8443
+        secure: true
+      prometheus:
+        baseUrl: https://thanos-querier.openshift-monitoring.svc.cluster.local
+        port: 9091
+      variantAutoscaling:
+        enabled: true
+        minReplicas: 1
+        maxReplicas: 10
+        variantCost: "10.0"
+        slo:
+          tpot: 10
+          ttft: 1000
+      hpa:
+        enabled: true
+        minReplicas: 1
+        maxReplicas: 10
+        targetAvgValue: 1
+        behavior:
+          scaleUp:
+            stabilizationWindowSeconds: 120
+            policies:
+              - type: Percent
+                value: 100
+                periodSeconds: 15
+          scaleDown:
+            stabilizationWindowSeconds: 120
+            policies:
+              - type: Percent
+                value: 100
+                periodSeconds: 15
+      vllmService:
+        enabled: false
+    chartVersions:
+      wva: 0.7.0
+      prometheusAdapter: 5.2.0
+    decode:
+      monitoring:
+        podmonitor:
+          enabled: true
+          portName: metrics
+          path: /metrics
+          interval: 30s
+          labels:
+            release: llmd
+    prefill:
+      monitoring:
+        podmonitor:
+          enabled: true
+          portName: metrics
+          path: /metrics
+          interval: 30s
+          labels:
+            release: llmd
