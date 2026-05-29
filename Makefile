@@ -36,7 +36,7 @@ BENCHMARK_REPO_URL   ?= https://github.com/llm-d/llm-d-benchmark.git
 BENCHMARK_REPO_DIR   ?= $(CURDIR)/llm-d-benchmark
 BENCHMARK_REPO_REF   ?= v0.6.3
 # TODO: verify benchmark repo guide path for v0.7.0 (was guides/inference-scheduling-wva)
-BENCHMARK_SPEC       ?= guides/workload-autoscaling
+BENCHMARK_SPEC       ?= guides/inference-scheduling-wva
 BENCHMARK_NAMESPACE  ?= # set via BENCHMARK_NAMESPACE=<namespace>
 BENCHMARK_GATEWAY_URL ?= http://infra-llmdbench-inference-gateway-istio.$(BENCHMARK_NAMESPACE).svc.cluster.local:80
 BENCHMARK_WORKSPACE  ?= $(CURDIR)
@@ -321,6 +321,7 @@ test-e2e-full-with-setup:
 # llmdbenchmark binary from the benchmark repo venv
 BENCHMARK_VENV       = $(BENCHMARK_REPO_DIR)/.venv
 LLMDBENCHMARK        = $(BENCHMARK_VENV)/bin/llmdbenchmark
+BENCHMARK_PYTHON     = $(BENCHMARK_VENV)/bin/python3
 
 # Common llmdbenchmark flags (spec + workspace + base dir for config resolution)
 BENCHMARK_CLI_FLAGS = --spec $(BENCHMARK_SPEC) --workspace $(BENCHMARK_WORKSPACE) --base-dir $(BENCHMARK_REPO_DIR)
@@ -454,6 +455,66 @@ benchmark-teardown: ## Tear down the benchmark environment (set BENCHMARK_NAMESP
 
 .PHONY: benchmark-full
 benchmark-full: benchmark-standup benchmark-run-all benchmark-teardown ## Full lifecycle: standup -> run all scenarios -> teardown
+
+# Saturation V1 HPA — scenario spec and thresholds
+#
+# Spec is in hack/ so it can be used without modifying the llm-d-benchmark repo.
+# Thresholds mirror WVA V1 defaults:
+#   KV target   = KvCacheThreshold(0.80) - KvSpareTrigger(0.10) = 0.70
+#   Queue target = QueueLengthThreshold(5.0) - QueueSpareTrigger(3.0) = 2.0
+HPA_BENCHMARK_SPEC     ?= $(CURDIR)/hack/benchmark/specifications/saturation-v1-hpa.yaml.j2
+HPA_BENCHMARK_CLI_FLAGS = --spec $(HPA_BENCHMARK_SPEC) --workspace $(BENCHMARK_WORKSPACE) --base-dir $(BENCHMARK_REPO_DIR)
+HPA_BENCHMARK_HARNESS  ?= inference-perf
+HPA_BENCHMARK_WORKLOAD ?= shared_prefix_synthetic.yaml
+# Respect BENCHMARK_HARNESS/WORKLOAD if explicitly passed on the command line,
+# otherwise fall back to the HPA-specific defaults above.
+_HPA_RUN_HARNESS  = $(if $(filter command line,$(origin BENCHMARK_HARNESS)),$(BENCHMARK_HARNESS),$(HPA_BENCHMARK_HARNESS))
+_HPA_RUN_WORKLOAD = $(if $(filter command line,$(origin BENCHMARK_WORKLOAD)),$(BENCHMARK_WORKLOAD),$(HPA_BENCHMARK_WORKLOAD))
+HPA_KV_CACHE_TARGET      ?= 700m
+HPA_QUEUE_TARGET         ?= 2
+HPA_MIN_REPLICAS         ?= 1
+HPA_MAX_REPLICAS         ?= 10
+# How often the HPA is allowed to add/remove one pod (seconds).
+# Larger values produce smoother scaling; smaller values react faster.
+HPA_SCALE_UP_PERIOD_SEC   ?= 180
+HPA_SCALE_DOWN_PERIOD_SEC ?= 300
+
+.PHONY: benchmark-standup-hpa
+benchmark-standup-hpa: ## Stand up Saturation V1 HPA benchmark scenario (set BENCHMARK_NAMESPACE=<namespace>)
+	@if [ -z "$(BENCHMARK_NAMESPACE)" ]; then \
+		echo "ERROR: BENCHMARK_NAMESPACE is required. Usage: make benchmark-standup-hpa BENCHMARK_NAMESPACE=<namespace>"; \
+		exit 1; \
+	fi
+	$(LLMDBENCHMARK) $(HPA_BENCHMARK_CLI_FLAGS) standup \
+		-p $(BENCHMARK_NAMESPACE) \
+		$(if $(BENCHMARK_MODEL_ID),-m $(BENCHMARK_MODEL_ID),) \
+		$(if $(filter true,$(BENCHMARK_MONITORING)),--monitoring,)
+	$(if $(BENCHMARK_MODEL_ID),$(BENCHMARK_PYTHON) hack/benchmark-patch-model-config.py $(BENCHMARK_WORKSPACE) $(BENCHMARK_MODEL_ID),)
+	$(BENCHMARK_PYTHON) hack/benchmark-swap-hpa.py \
+		$(BENCHMARK_NAMESPACE) \
+		$(HPA_KV_CACHE_TARGET) \
+		$(HPA_QUEUE_TARGET) \
+		$(HPA_MIN_REPLICAS) \
+		$(HPA_MAX_REPLICAS) \
+		$(HPA_SCALE_UP_PERIOD_SEC) \
+		$(HPA_SCALE_DOWN_PERIOD_SEC)
+
+.PHONY: benchmark-run-hpa
+benchmark-run-hpa: ## Run benchmark against Saturation V1 HPA setup (set BENCHMARK_NAMESPACE=<namespace>)
+	@if [ -z "$(BENCHMARK_NAMESPACE)" ]; then \
+		echo "ERROR: BENCHMARK_NAMESPACE is required. Usage: make benchmark-run-hpa BENCHMARK_NAMESPACE=<namespace>"; \
+		exit 1; \
+	fi
+	@if [ -f "$(BENCHMARK_SCENARIOS_DIR)/$(_HPA_RUN_WORKLOAD)" ]; then \
+		cp "$(BENCHMARK_SCENARIOS_DIR)/$(_HPA_RUN_WORKLOAD)" \
+		   "$(BENCHMARK_REPO_DIR)/workload/profiles/guidellm/$(_HPA_RUN_WORKLOAD)"; \
+	fi
+	$(LLMDBENCHMARK) $(HPA_BENCHMARK_CLI_FLAGS) run \
+		-p $(BENCHMARK_NAMESPACE) \
+		-l $(_HPA_RUN_HARNESS) \
+		-w $(_HPA_RUN_WORKLOAD) \
+		$(if $(BENCHMARK_MODEL_ID),-m $(BENCHMARK_MODEL_ID),) \
+		$(if $(filter true,$(BENCHMARK_MONITORING)),--monitoring,)
 
 # Stub for llm-d nightly reusable workflows (test_target=nightly-test-llm-d)
 # No-op; temporarily satisfies nightly CI make invocation

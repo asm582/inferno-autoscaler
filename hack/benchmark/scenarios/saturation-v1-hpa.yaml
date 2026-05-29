@@ -1,0 +1,269 @@
+# SATURATION V1 HPA BENCHMARK SCENARIO
+#
+# Deploys vLLM + EPP + prometheus-adapter (for HPA external metrics) without
+# the WVA controller. After standup, hack/benchmark-swap-hpa.py replaces the
+# WVA-managed HPA with a plain Saturation V1 HPA driven by vLLM metrics.
+#
+# Analytics label: "saturation-v1-hpa" — distinct from "inference-scheduling-wva"
+# so results can be filtered and compared cleanly against WVA runs.
+#
+# Use with:
+#   make benchmark-standup-hpa BENCHMARK_NAMESPACE=<namespace>
+#   make benchmark-run-hpa     BENCHMARK_NAMESPACE=<namespace>
+
+scenario:
+  - name: "saturation-v1-hpa"
+
+    # =========================================================================
+    # MODEL CONFIGURATION
+    # =========================================================================
+    model:
+      name: Qwen/Qwen3-32B
+      shortName: qwen-qwen3-32b
+      path: models/Qwen/Qwen3-32B
+      huggingfaceId: Qwen/Qwen3-32B
+      size: 1Ti
+      maxModelLen: 16000
+      blockSize: 64
+      gpuMemoryUtilization: 0.95
+
+    # =========================================================================
+    # DEPLOYMENT METHOD
+    # =========================================================================
+    modelservice:
+      enabled: true
+
+    standalone:
+      enabled: false
+
+    # =========================================================================
+    # WVA CONFIGURATION
+    #
+    # WVA installs prometheus-adapter and creates the VariantAutoscaling CR
+    # (needed to discover the decode Deployment name in benchmark-swap-hpa.py).
+    # After standup completes, benchmark-swap-hpa.py scales the WVA controller
+    # to 0 and replaces the WVA-managed HPA with a Saturation V1 HPA.
+    # =========================================================================
+    wva:
+      enabled: true
+      wellLitPath: saturation-v1-hpa
+      namespace: ""
+
+      image:
+        repository: ghcr.io/llm-d/llm-d-workload-variant-autoscaler
+        tag: v0.6.0
+
+      replicaCount: 1
+
+      controller:
+        enabled: true
+
+      namespaceScoped: true
+
+      metrics:
+        enabled: true
+        port: 8443
+        secure: true
+
+      prometheus:
+        baseUrl: https://thanos-querier.openshift-monitoring.svc.cluster.local
+        port: 9091
+
+      variantAutoscaling:
+        enabled: true
+        minReplicas: 1
+        maxReplicas: 10
+        variantCost: "10.0"
+        slo:
+          tpot: 10
+          ttft: 1000
+
+      # WVA HPA is installed here then replaced by hack/benchmark-swap-hpa.py.
+      hpa:
+        enabled: true
+        minReplicas: 1
+        maxReplicas: 10
+        targetAvgValue: 1
+        behavior:
+          scaleUp:
+            stabilizationWindowSeconds: 120
+            policies:
+              - type: Percent
+                value: 100
+                periodSeconds: 15
+          scaleDown:
+            stabilizationWindowSeconds: 120
+            policies:
+              - type: Percent
+                value: 100
+                periodSeconds: 15
+
+      vllmService:
+        enabled: false
+
+    # =========================================================================
+    # CHART VERSIONS
+    # =========================================================================
+    chartVersions:
+      wva: 0.6.0
+      prometheusAdapter: 5.2.0
+
+    # =========================================================================
+    # ROUTING / EPP CONFIGURATION
+    #
+    # Same plugin weights and flowControl gate as inference-scheduling-wva.
+    # flowControl is needed so EPP tracks queue depth, which the Saturation V1
+    # HPA reads via vllm_num_requests_waiting.
+    # =========================================================================
+    inferenceExtension:
+      pluginsConfigFile: "sat-v1-plugins.yaml"
+      pluginsCustomConfig:
+        sat-v1-plugins.yaml: |
+          apiVersion: inference.networking.x-k8s.io/v1alpha1
+          kind: EndpointPickerConfig
+          featureGates:
+            - flowControl
+          plugins:
+            - type: queue-scorer
+            - type: kv-cache-utilization-scorer
+            - type: prefix-cache-scorer
+          schedulingProfiles:
+            - name: default
+              plugins:
+                - pluginRef: queue-scorer
+                  weight: 2
+                - pluginRef: kv-cache-utilization-scorer
+                  weight: 2
+                - pluginRef: prefix-cache-scorer
+                  weight: 3
+
+    # =========================================================================
+    # PREFILL / DECODE CONFIGURATION
+    # =========================================================================
+    prefill:
+      enabled: false
+      replicas: 0
+
+    decode:
+      replicas: 1
+
+      initContainers:
+        - name: preprocess
+          imageKey: benchmark
+          imagePullPolicy: Always
+          command: ["set_llmdbench_environment.py", "-e", "/shared-config/llmdbench_env.sh", "-i"]
+          volumeMounts:
+            - name: shared-config
+              mountPath: /shared-config
+
+      parallelism:
+        tensor: 1
+        data: 1
+        dataLocal: 1
+        workers: 1
+
+      resources:
+        limits:
+          memory: 64Gi
+          cpu: "16"
+        requests:
+          memory: 64Gi
+          cpu: "16"
+
+      extraEnvVars:
+        - name: PYTORCH_ALLOC_CONF
+          value: "expandable_segments:True"
+
+      extraContainerConfig:
+        ports:
+          - containerPort: 5557  # NIXL side channel port
+            protocol: TCP
+          - containerPort: 8200  # Metrics port
+            name: metrics
+            protocol: TCP
+        securityContext:
+          capabilities:
+            add:
+              - "IPC_LOCK"
+              - "SYS_RAWIO"
+          runAsGroup: 0
+          runAsUser: 0
+        imagePullPolicy: Always
+
+      additionalVolumeMounts: []
+      additionalVolumes: []
+
+      probes:
+        startup:
+          path: /v1/models
+          failureThreshold: 60
+          initialDelaySeconds: 15
+          periodSeconds: 30
+          timeoutSeconds: 5
+        liveness:
+          path: /health
+          failureThreshold: 3
+          periodSeconds: 10
+          timeoutSeconds: 5
+        readiness:
+          path: /v1/models
+          failureThreshold: 3
+          periodSeconds: 5
+          timeoutSeconds: 2
+
+      monitoring:
+        podmonitor:
+          enabled: true
+          portName: metrics
+          path: /metrics
+          interval: 30s
+          labels:
+            release: llmd
+
+    # =========================================================================
+    # VLLM COMMON CONFIGURATION
+    # =========================================================================
+    vllmCommon:
+      kvTransfer:
+        enabled: true
+        connector: NixlConnector
+        role: kv_both
+
+      flags:
+        enforceEager: true
+        disableLogRequests: true
+        disableUvicornAccessLog: true
+        allowLongMaxModelLen: "1"
+        serverDevMode: "1"
+
+      volumes:
+        - name: shared-config
+          type: emptyDir
+          emptyDir: {}
+        - name: dshm
+          type: emptyDir
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Gi
+
+      volumeMounts:
+        - name: dshm
+          mountPath: /dev/shm
+        - name: shared-config
+          mountPath: /shared-config
+
+    # =========================================================================
+    # STORAGE
+    # =========================================================================
+    storage:
+      modelPvc:
+        size: 1Ti
+
+    # =========================================================================
+    # WORKLOAD / HARNESS
+    # =========================================================================
+    workDir: "~/data/saturation-v1-hpa"
+
+    harness:
+      name: inference-perf
+      experimentProfile: shared_prefix_synthetic.yaml

@@ -10,6 +10,7 @@ Welcome to the WVA documentation! This directory contains comprehensive guides f
 - **[Installation Guide](https://llm-d.ai/docs/guides/workload-autoscaling)** - Installing WVA on your cluster
 - **[Configuration](https://llm-d.ai/docs/architecture/advanced/autoscaling/workload-variant-autoscaling#configuration)** - Configuring WVA for your workloads
 - **[Architecture](https://llm-d.ai/docs/architecture/advanced/autoscaling)** - Understanding how WVA works under the hood
+- **[Saturation V1 HPA](user-guide/saturation-v1-hpa.md)** - Replicating Saturation V1 logic with a plain Kubernetes HPA (no WVA controller required)
 
 ### Design
 
