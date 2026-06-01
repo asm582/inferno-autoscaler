@@ -239,9 +239,6 @@ scenario:
           portName: metrics
           path: /metrics
           interval: 30s
-          labels:
-            release: llmd
-
       initContainers:
         - name: preprocess
           imageKey: benchmark
@@ -318,9 +315,6 @@ scenario:
           portName: metrics
           path: /metrics
           interval: 30s
-          labels:
-            release: llmd
-
       initContainers:
         - name: preprocess
           imageKey: benchmark
