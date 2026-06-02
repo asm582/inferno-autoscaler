@@ -136,7 +136,8 @@ quota hard limit already equals the GPU capacity visible to workloads in the nam
   keyed by `nvidia.com/gpu`.
 
   **`VariantAutoscaling` is optional and will be deprecated.** When a VA is provided,
-  `acceleratorName` must be set explicitly so the limiter knows which pool to debit.
+  `acceleratorName` must be set explicitly so it matches the GPU resource name in the
+  `ResourceQuota` (e.g. `nvidia.com/gpu`).
 
 - **Usage from `status.used`, not pod listing.** The Kubernetes quota admission
   controller maintains `ResourceQuota.status.used` automatically and is the authoritative
