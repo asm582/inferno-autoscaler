@@ -58,8 +58,6 @@ rules out a class of deployment environments:
 
 In each of these cases a namespace-scoped quota is both available and sufficient: the
 quota hard limit already equals the GPU capacity visible to workloads in the namespace.
-Reading it directly is simpler and more accurate than reverse-engineering capacity from
-node labels.
 
 ### Goals
 
@@ -137,12 +135,8 @@ node labels.
   `nvidia.com/gpu: 8`, not `NVIDIA-A100-PCIE-80GB: 8`. `TypeInventory` pools will be
   keyed by `nvidia.com/gpu`.
 
-  **`acceleratorName` on the VA spec is optional.** When unset and the quota defines
-  exactly one GPU vendor (the common single-tenant case), `DefaultLimiter` automatically
-  resolves the empty name to the only pool that exists — `nvidia.com/gpu`. Setting
-  `acceleratorName` explicitly is only required when the namespace quota covers more than
-  one GPU vendor (e.g., both `nvidia.com/gpu` and `amd.com/gpu`), because the limiter
-  cannot determine which pool to debit without a hint.
+  **`VariantAutoscaling` is optional and will be deprecated.** When a VA is provided,
+  `acceleratorName` must be set explicitly so the limiter knows which pool to debit.
 
 - **Usage from `status.used`, not pod listing.** The Kubernetes quota admission
   controller maintains `ResourceQuota.status.used` automatically and is the authoritative
@@ -163,7 +157,7 @@ node labels.
 |---|---|---|---|
 | Quota larger than available node capacity causes pending pods | Medium | Medium | Document the requirement that quota hard limit must reflect actual node pool size. The optimizer acts conservatively: it schedules up to the quota, but Kubernetes will hold pods pending if nodes are full. |
 | `status.used` is stale immediately after quota creation | Low | Low | The admission controller updates `status.used` synchronously on pod admission; staleness is bounded by the API server response time, well within the 30-second optimization interval. |
-| Multi-vendor quota with unset `acceleratorName` | Low | Low | `acceleratorName` is optional in single-vendor namespaces — the limiter auto-resolves it. In multi-vendor namespaces it must be set; the optimizer skips unresolved variants and logs a warning rather than over-allocating. |
+| VA provided without `acceleratorName` set | Low | Low | When a VA is used, `acceleratorName` must be set. The optimizer skips unresolved variants and logs a warning rather than over-allocating. VA itself is optional and will be deprecated. |
 | Mixed GPU types in one namespace share one pool | Low | Low | Documented as a known limitation. Use `K8sWithGpuOperator` for heterogeneous GPU namespaces. |
 
 ---
@@ -245,21 +239,18 @@ This is the only change to `engine.go`.
 
 ### Accelerator Name Convention
 
-| Discovery mode | `TypeInventory` pool key | VA `acceleratorName` | Required? |
-|---|---|---|---|
-| `K8sWithGpuOperator` | `A100`, `H100` (normalized from node label) | `A100` | Optional — auto-resolved in homogeneous clusters |
-| `NamespaceQuotaDiscovery`, single vendor | `nvidia.com/gpu` | omit or `nvidia.com/gpu` | **Optional** — limiter auto-resolves to the only pool |
-| `NamespaceQuotaDiscovery`, multi-vendor | `nvidia.com/gpu`, `amd.com/gpu` | `nvidia.com/gpu` or `amd.com/gpu` | **Required** — limiter cannot pick a pool without a hint |
+| Discovery mode | `TypeInventory` pool key | VA `acceleratorName` |
+|---|---|---|
+| `K8sWithGpuOperator` | `A100`, `H100` (normalized from node label) | `A100` |
+| `NamespaceQuotaDiscovery` | `nvidia.com/gpu` (resource name, passed through) | `nvidia.com/gpu` |
 
-The difference in key convention from `K8sWithGpuOperator` is intentional.
+`VariantAutoscaling` is optional and will be deprecated. When a VA is provided,
+`acceleratorName` must be set so the limiter knows which pool to debit.
+
+The difference in pool key convention from `K8sWithGpuOperator` is intentional:
 `NormalizeAcceleratorName` strips vendor and memory suffixes from full GPU model names
 (e.g. `NVIDIA-A100-PCIE-80GB` → `A100`); it is not applied to quota resource names
 because there is no suffix to strip. `nvidia.com/gpu` passes through unchanged.
-
-The auto-resolution behaviour is implemented in `DefaultLimiter.resolveUnknownAccelerators()`:
-when the inventory has exactly one pool and a decision's `AcceleratorName` is unset, the
-limiter fills it in before allocation. This means most single-vendor quota deployments
-require no `acceleratorName` at all on the VA spec.
 
 ---
 
@@ -511,11 +502,10 @@ are simultaneously saturated.
   `K8sWithGpuOperator`. The risk is low: both implement the same `FullDiscovery`
   interface and the new backend is simpler (two API calls vs. three vendor-specific
   node list calls).
-- In multi-vendor namespaces, operators must set `acceleratorName` on each VA spec or
-  decisions for that variant will be skipped. The failure mode is conservative (no
-  over-allocation) but requires operator attention. A log warning makes this diagnosable.
-  Single-vendor namespaces — the common case — are unaffected: the limiter auto-resolves
-  an unset `acceleratorName` to the only pool.
+- When a VA is provided, `acceleratorName` must be set or decisions for that variant will
+  be skipped. The failure mode is conservative (no over-allocation) but requires operator
+  attention. A log warning makes this diagnosable. VA itself is optional and will be
+  deprecated.
 
 ---
 
