@@ -36,9 +36,10 @@ Namespace Quota Capacity Discovery
 Add `NamespaceQuotaDiscovery`, a new implementation of the existing `CapacityDiscovery`
 interface that derives GPU capacity from Kubernetes `ResourceQuota` objects rather than
 from GPU Operator node labels. When enabled via `WVA_CAPACITY_NAMESPACES=ns-a,ns-b,ns-c`,
-the engine creates one quota-backed limiter per namespace and invokes the optimizer
-separately for each namespace's models — so each namespace's quota ceiling is enforced
-independently with no optimizer changes required.
+the engine replaces `e.GPULimiter` with a `NamespaceLimiter` that holds one quota-backed
+`DefaultLimiter` per namespace. Both the V1 (`optimizeV1`) and V2 (`optimizeV2`) paths
+consume `e.GPULimiter` and therefore enforce per-namespace quota ceilings without any
+changes to the optimizers, `DefaultLimiter`, or `TypeInventory`.
 
 ---
 
@@ -57,8 +58,10 @@ rules out a class of deployment environments:
   already encode GPU capacity in `ResourceQuota.spec.hard` — this is the authoritative
   source and scanning nodes would duplicate it.
 
-In each of these cases a namespace-scoped quota is both available and sufficient: the
-quota hard limit already equals the GPU capacity visible to workloads in the namespace.
+In each of these cases a namespace-scoped quota is a practical fallback: the quota hard
+limit equals the GPU capacity visible to workloads in the namespace. Where GPU Operator
+labels are accessible, `K8sWithGpuOperator` remains the preferred backend — it provides
+GPU-model-aware scheduling and more precise per-node inventory that quota cannot express.
 
 Beyond fixing the discovery problem, knowing a trustworthy total GPU ceiling is a
 prerequisite for a broader class of fair-share problems. Consider two models served in the
@@ -84,8 +87,6 @@ optimizer is addressed in a follow-up proposal.
 
 ### Non-Goals
 
-- Replacing `K8sWithGpuOperator` — it remains the default and is required for
-  GPU-model-aware scheduling (e.g., differentiating A100 from H100).
 - GPU-model-aware scheduling: all GPUs in a namespace are treated as one pool keyed by
   resource name (e.g. `nvidia.com/gpu`). Differentiating A100 from H100 within a
   namespace requires `K8sWithGpuOperator`.
@@ -104,21 +105,19 @@ optimizer is addressed in a follow-up proposal.
 > As a platform engineer running WVA on GKE Autopilot, I cannot access GPU Operator
 > node labels, but my namespace has a `ResourceQuota` limiting `nvidia.com/gpu: 8`.
 > I want the greedy optimizer to treat 8 as the total GPU budget so it does not
-> over-schedule replicas beyond what the cluster can place.
+> change replica count beyond what the cluster can place.
 
 **Story 2 — Quota-first operations**
 
 > As a platform team that manages GPU capacity via quota rather than node labels,
-> I want a single source of truth: the quota. I do not want to maintain GPU Operator
-> labels in parallel.
+> I want a single source of truth: the quota.
 
 ### Notes and Constraints
 
 - **Quota equals capacity.** This design treats `ResourceQuota.spec.hard` as the total
   GPU capacity available to workloads in the namespace. No node inventory, no GPU Operator
   labels — the quota is the single source of truth for how many GPUs can be scheduled.
-  Keeping the quota aligned with actual node capacity is the operator's responsibility,
-  the same way correct node labels are the operator's responsibility with `K8sWithGpuOperator`.
+  Keeping the quota aligned with actual node capacity is the operator's responsibility.
 
 - **Accelerator key is the resource name, not the model name.** `ResourceQuota` stores
   `nvidia.com/gpu: 8`, not `NVIDIA-A100-PCIE-80GB: 8`. `TypeInventory` pools will be
@@ -128,104 +127,211 @@ optimizer is addressed in a follow-up proposal.
   `acceleratorName` must be set explicitly so it matches the GPU resource name in the
   `ResourceQuota` (e.g. `nvidia.com/gpu`).
 
-- **Usage from `status.used`, not pod listing.** `ResourceQuota.status.used` is
-  maintained by the quota admission controller and covers all admitted workloads in the
-  namespace — including pending pods and non-WVA workloads — whereas
-  `K8sWithGpuOperator.DiscoverUsage()` sums requests only from scheduled WVA-managed
-  pods. Both are defensible; `status.used` is the more conservative count and the natural
-  source of truth when quota is the capacity model.
+- **V1 usage covers all namespace workloads.** V1 reads `ResourceQuota.status.used`
+  via `TypeInventory.RefreshAll()`, reflecting all GPU consumers in the namespace.
+  Available GPUs = `spec.hard` − `status.used`. V2 currently derives usage from
+  WVA-managed decisions only; non-WVA workloads are not counted in V2 constraints
+  (see recommendation in the Design Details section).
 
-- **Each namespace's quota is enforced independently.** A `ResourceQuota` only governs
-  pods in its own namespace, so each namespace's ceiling must apply only to models running
-  in that namespace. The engine achieves this without any optimizer changes by invoking
-  the optimizer once per namespace with only that namespace's requests and constraint.
-  Models in ns-a compete for ns-a's GPU quota; models in ns-b compete for ns-b's — there
-  is no cross-namespace sharing.
+- **Each namespace's quota is enforced independently.** Each namespace listed in
+  `WVA_CAPACITY_NAMESPACES` gets its own `DefaultLimiter` backed by its own
+  `NamespaceQuotaDiscovery`. `NamespaceLimiter` ensures that scaling decisions for ns-a
+  are only evaluated against ns-a's `ResourceQuota`, and ns-b's against ns-b's. A saturated model in ns-a consuming its full quota does not reduce the
+  GPU headroom available to models in ns-b.
 
-- **Multiple quotas are aggregated.** If a namespace has more than one `ResourceQuota`
-  object each quota is treated as a separate inventory entry (outer key in the
-  `Discover()` map). `TypeInventory.Refresh()` sums them as it does for multiple nodes —
-  no change to the aggregation logic is needed.
+
 
 ### Risks and Mitigations
 
 | Risk | Likelihood | Impact | Mitigation |
 |---|---|---|---|
-| `status.used` is stale immediately after quota creation | Low | Low | The admission controller updates `status.used` synchronously on pod admission; staleness is bounded by the API server response time, well within the 30-second optimization interval. |
-| VA provided without `acceleratorName` set | Low | Low | When a VA is used, `acceleratorName` must be set. The optimizer skips unresolved variants and logs a warning rather than over-allocating. VA itself is optional and will be deprecated. |
+| `status.used` transiently stale during rapid pod churn | Low | Low | The quota admission controller updates `status.used` synchronously on pod admission. Staleness is bounded by API server response time, well within the 30-second optimization interval. |
+| Operator leaves `acceleratorName` set to `A100` after switching from `K8sWithGpuOperator` | Low | Low | `resolveUnknownAccelerators()` auto-resolves empty/unknown names to `nvidia.com/gpu` when the namespace has a single GPU pool. Operators must clear stale model-specific names. Logged as a warning. |
 | Mixed GPU types in one namespace share one pool | Low | Low | Documented as a known limitation. Use `K8sWithGpuOperator` for heterogeneous GPU namespaces. |
 
 ---
 
 ## Design Details
 
-### New File: `internal/discovery/namespace_quota.go`
+### Overview
 
-`NamespaceQuotaDiscovery` implements `FullDiscovery` by reading `ResourceQuota` objects.
-It is a leaf implementation — it introduces no new interfaces, types, or abstractions.
+Two new files, two small edits. No new Go interfaces, no new fields on `Engine`, no
+changes to `optimizeV1`, `DefaultLimiter`, `TypeInventory`, or any optimizer.
 
 ```
 internal/discovery/
-  interface.go                 # unchanged
-  types.go                     # unchanged
-  k8s_with_gpu_operator.go     # unchanged
-  namespace_quota.go           # NEW
+  namespace_quota.go           # NEW — NamespaceQuotaDiscovery
   namespace_quota_test.go      # NEW
+
+internal/engines/pipeline/
+  namespace_limiter.go         # NEW — NamespaceLimiter wrapper
+  namespace_limiter_test.go    # NEW
+  default_limiter.go           # EDIT — useDiscoveredUsage flag, ~20 lines
+
+internal/engines/saturation/
+  engine.go                    # EDIT — NewEngine() only, ~15 lines
 ```
+
+---
+
+### `internal/discovery/namespace_quota.go`
+
+`NamespaceQuotaDiscovery` implements `FullDiscovery` by reading `ResourceQuota` objects.
 
 **`Discover(ctx) → map[quotaName]map[resourceName]AcceleratorModelInfo`**
 
 1. List `ResourceQuotaList` in `d.Namespace`.
-2. For each quota, scan `Spec.Hard` for GPU resource names (see table below).
-3. Return each quota as its own outer key so `TypeInventory.Refresh()` can aggregate
-   without any modification.
+2. For each quota, scan `Spec.Hard` for GPU resource names via `gpuResourceName()`.
+3. Return each quota as its own outer key so `TypeInventory.Refresh()` aggregates
+   multiple quotas in the same namespace without modification.
 
 **`DiscoverUsage(ctx) → map[resourceName]int`**
 
-1. List `ResourceQuotaList` in `d.Namespace`.
-2. Aggregate `Status.Used` values for GPU resource names across all quotas.
-3. Return the map. No pod listing. No inference.
+Lists `ResourceQuotaList` and sums `Status.Used` values per canonical GPU resource.
+Called by both V1 and V2 via `TypeInventory.RefreshAll()` — see `default_limiter.go`
+changes below.
 
 **`DiscoverNodes(ctx) → map[string]NodeInfo`**
 
-Returns an empty map. Quota-based discovery has no per-node information; callers that
-require node affinity must use `K8sWithGpuOperator`.
+Returns an empty map — no per-node data in quota-based discovery.
 
-**Interface compliance assertion:**
+**`gpuResourceName(res string) string`**
+
+Internal helper. Strips the `requests.` prefix then matches known GPU resource names.
+This prevents `requests.nvidia.com/gpu` and `nvidia.com/gpu` from creating two separate
+pool keys and double-counting when both appear in one quota.
+
+```go
+func gpuResourceName(res string) string {
+    res = strings.TrimPrefix(res, "requests.")
+    switch res {
+    case "nvidia.com/gpu", "amd.com/gpu", "intel.com/gpu":
+        return res
+    }
+    return ""
+}
+```
+
+| Quota resource key | Canonical pool key |
+|---|---|
+| `nvidia.com/gpu` | `nvidia.com/gpu` |
+| `requests.nvidia.com/gpu` | `nvidia.com/gpu` (prefix stripped) |
+| `amd.com/gpu` | `amd.com/gpu` |
+| `requests.amd.com/gpu` | `amd.com/gpu` (prefix stripped) |
+| `intel.com/gpu` | `intel.com/gpu` |
+| `requests.intel.com/gpu` | `intel.com/gpu` (prefix stripped) |
 
 ```go
 var _ FullDiscovery = (*NamespaceQuotaDiscovery)(nil)
 ```
 
-**GPU resource names recognized:**
+---
 
-| Resource name | Vendor |
-|---|---|
-| `nvidia.com/gpu` | NVIDIA |
-| `requests.nvidia.com/gpu` | NVIDIA (prefixed form) |
-| `amd.com/gpu` | AMD |
-| `requests.amd.com/gpu` | AMD (prefixed form) |
-| `intel.com/gpu` | Intel |
-| `requests.intel.com/gpu` | Intel (prefixed form) |
+### `internal/engines/pipeline/namespace_limiter.go`
 
-### API Changes
-
-No new CRDs, no new API types, no new flags in the saturation ConfigMap. The only user-
-facing surface is the environment variable and the `acceleratorName` convention on VA specs.
-
-### Activation
-
-`WVA_CAPACITY_NAMESPACES` accepts a comma-separated list of namespaces. When set, the
-engine creates one `NamespaceQuotaDiscovery` and one `DefaultLimiter` per namespace,
-keyed by namespace name. When unset, the existing `K8sWithGpuOperator` path is used.
-
-**`NewEngine()` — build per-namespace limiters:**
+`NamespaceLimiter` wraps a map of per-namespace `DefaultLimiter`s and implements the
+existing `Limiter` interface. It is the single integration point for both V1 and V2.
 
 ```go
-// internal/engines/saturation/engine.go — NewEngine()
-var quotaLimiters map[string]*pipeline.DefaultLimiter
+type NamespaceLimiter struct {
+    limiters map[string]*DefaultLimiter // keyed by namespace
+}
+
+func NewNamespaceLimiter(limiters map[string]*DefaultLimiter) *NamespaceLimiter
+
+func (n *NamespaceLimiter) Name() string { return "namespace-quota-limiter" }
+
+// Limit satisfies the Limiter interface — used by V1 (optimizeV1).
+// Groups decisions by d.Namespace and calls the matching DefaultLimiter.Limit().
+// Namespaces not in the map run unlimited.
+func (n *NamespaceLimiter) Limit(ctx context.Context, decisions []*interfaces.VariantDecision) error
+
+// LimiterForNamespace returns the DefaultLimiter for ns, or nil if not quota-governed.
+// Used by the V2 path to call ComputeConstraints() per namespace.
+func (n *NamespaceLimiter) LimiterForNamespace(ns string) *DefaultLimiter
+
+var _ Limiter = (*NamespaceLimiter)(nil)
+```
+
+---
+
+### `internal/engines/pipeline/default_limiter.go` — `useDiscoveredUsage` flag
+
+Add a `useDiscoveredUsage` flag and a new constructor. When set, `Limit()` and
+`ComputeConstraints()` call `TypeInventory.RefreshAll()` instead of `Refresh()` +
+`calculateUsedGPUs()`/`SetUsed()`. `RefreshAll()` calls both `Discover()` (reads
+`spec.hard`) and `DiscoverUsage()` (reads `status.used`) in one pass — covering all
+GPU workloads in the namespace, not just WVA-managed ones.
+
+```go
+// NewDefaultLimiterWithDiscoveredUsage creates a limiter that reads usage from
+// DiscoverUsage() (ResourceQuota.status.used) instead of computing it from
+// decision replicas. Use for quota-backed inventories.
+func NewDefaultLimiterWithDiscoveredUsage(name string, inventory *TypeInventory, algorithm AllocationAlgorithm) *DefaultLimiter {
+    return &DefaultLimiter{
+        name:               name,
+        inventory:          inventory,
+        algorithm:          algorithm,
+        metricsEmitter:     metrics.NewMetricsEmitter(),
+        useDiscoveredUsage: true,
+    }
+}
+```
+
+**`Limit()` — replace the first two steps:**
+
+```go
+if l.useDiscoveredUsage {
+    // reads spec.hard (capacity) + status.used (usage) in one call
+    if inv, ok := l.inventory.(*TypeInventory); ok {
+        if err := inv.RefreshAll(ctx); err != nil {
+            return fmt.Errorf("failed to refresh quota inventory: %w", err)
+        }
+    }
+} else {
+    if err := l.inventory.Refresh(ctx); err != nil {
+        return fmt.Errorf("failed to refresh inventory: %w", err)
+    }
+    l.inventory.SetUsed(l.calculateUsedGPUs(decisions))
+}
+```
+
+**`ComputeConstraints()` — same pattern:**
+
+```go
+if l.useDiscoveredUsage {
+    if inv, ok := l.inventory.(*TypeInventory); ok {
+        if err := inv.RefreshAll(ctx); err != nil {
+            return nil, fmt.Errorf("failed to refresh quota inventory: %w", err)
+        }
+    }
+} else {
+    if err := l.inventory.Refresh(ctx); err != nil {
+        return nil, fmt.Errorf("failed to refresh inventory: %w", err)
+    }
+    l.inventory.SetUsed(currentUsage)
+}
+```
+
+When `useDiscoveredUsage` is true the `currentUsage` parameter to `ComputeConstraints()`
+is ignored — usage comes from `status.used` via `RefreshAll()`.
+
+---
+
+### `engine.go` — `NewEngine()` change
+
+After the existing `gpuLimiter` is built, override it with a `NamespaceLimiter` when
+`WVA_CAPACITY_NAMESPACES` is set. The `GPULimiter: gpuLimiter` assignment is unchanged.
+
+```go
+// existing lines — unchanged
+gpuDiscovery := discovery.NewK8sWithGpuOperator(client)
+gpuInventory := pipeline.NewTypeInventoryWithUsage("cluster-gpu-inventory", gpuDiscovery)
+gpuLimiter   := pipeline.NewDefaultLimiter("gpu-limiter", gpuInventory, pipeline.NewGreedyBySaturation())
+
+// NEW: replace with NamespaceLimiter when quota mode is configured
 if nsEnv := os.Getenv("WVA_CAPACITY_NAMESPACES"); nsEnv != "" {
-    quotaLimiters = make(map[string]*pipeline.DefaultLimiter)
+    perNS := make(map[string]*pipeline.DefaultLimiter)
     for _, ns := range strings.Split(nsEnv, ",") {
         ns = strings.TrimSpace(ns)
         if ns == "" {
@@ -233,54 +339,56 @@ if nsEnv := os.Getenv("WVA_CAPACITY_NAMESPACES"); nsEnv != "" {
         }
         disc := discovery.NewNamespaceQuotaDiscovery(client, ns)
         inv  := pipeline.NewTypeInventoryWithUsage("quota-inventory-"+ns, disc)
-        quotaLimiters[ns] = pipeline.NewDefaultLimiter("quota-limiter-"+ns, inv, pipeline.NewGreedyBySaturation())
+        perNS[ns] = pipeline.NewDefaultLimiterWithDiscoveredUsage("quota-limiter-"+ns, inv, pipeline.NewGreedyBySaturation())
     }
+    gpuLimiter = pipeline.NewNamespaceLimiter(perNS)
 }
-// if quotaLimiters is nil, existing K8sWithGpuOperator path is used unchanged
+
+// existing line — unchanged
+GPULimiter: gpuLimiter,
 ```
 
-**Optimize loop — invoke optimizer once per namespace:**
+**V1 — reads both `spec.hard` and `status.used` from the quota.** `optimizeV1` calls
+`e.GPULimiter.Limit(ctx, decisionPtrs)`. With `e.GPULimiter` set to a `NamespaceLimiter`,
+`Limit()` groups decisions by `d.Namespace` and calls each namespace's
+`DefaultLimiter.Limit()`. Because the per-namespace limiters are created with
+`NewDefaultLimiterWithDiscoveredUsage()`, `Limit()` calls `TypeInventory.RefreshAll()`
+which reads `ResourceQuota.spec.hard` (capacity) and `ResourceQuota.status.used` (usage)
+in one pass. Zero changes to `optimizeV1` itself.
 
-```go
-// internal/engines/saturation/engine.go — optimize()
-if quotaLimiters != nil {
-    byNamespace := groupRequestsByNamespace(requests)
-    for ns, nsRequests := range byNamespace {
-        var constraints []*pipeline.ResourceConstraints
-        if limiter, ok := quotaLimiters[ns]; ok {
-            usage := computeCurrentGPUUsage(nsRequests)
-            if c, err := limiter.ComputeConstraints(ctx, usage); err != nil {
-                logger.Error(err, "quota constraint failed, namespace runs unlimited", "namespace", ns)
-            } else {
-                constraints = append(constraints, c)
-            }
-        }
-        decisions := e.optimizer.Optimize(ctx, nsRequests, constraints)
-        allDecisions = append(allDecisions, decisions...)
-    }
-} else {
-    // existing global constraint path — unchanged
-}
-```
+**V2 already reads `spec.hard` from the quota.** `ComputeConstraints()` calls
+`inventory.Refresh(ctx)` → `NamespaceQuotaDiscovery.Discover()` — reading
+`ResourceQuota.spec.hard`. The V2 change below is needed only to dispatch per-namespace
+rather than treating all requests as a single global pool.
 
-The optimizer receives only the requests for one namespace at a time, so its internal
-`available` map naturally reflects that namespace's quota ceiling. No changes to
-`GreedyByScoreOptimizer` or `mergeConstraints` are required.
+> **Recommendation:** For consistency with V1, V2 should also adopt
+> `NewDefaultLimiterWithDiscoveredUsage()` so `ComputeConstraints()` reads
+> `ResourceQuota.status.used` via `RefreshAll()` instead of using
+> `computeCurrentGPUUsage(nsRequests)`. This ensures non-WVA GPU workloads are
+> accounted for in V2 constraints. Tracked as a follow-up.
+
+---
+
+### API Changes
+
+No new CRDs, no new API types, no new flags in the saturation ConfigMap, no new Go
+interfaces. The only user-facing surface is the `WVA_CAPACITY_NAMESPACES` environment
+variable and the `acceleratorName` convention on VA specs.
+
+---
 
 ### Accelerator Name Convention
 
 | Discovery mode | `TypeInventory` pool key | VA `acceleratorName` |
 |---|---|---|
 | `K8sWithGpuOperator` | `A100`, `H100` (normalized from node label) | `A100` |
-| `NamespaceQuotaDiscovery` | `nvidia.com/gpu` (resource name, passed through) | `nvidia.com/gpu` |
+| `NamespaceQuotaDiscovery` | `nvidia.com/gpu` (canonical resource name) | `nvidia.com/gpu` or empty (auto-resolved) |
 
-`VariantAutoscaling` is optional and will be deprecated. When a VA is provided,
-`acceleratorName` must be set so the limiter knows which pool to debit.
-
-The difference in pool key convention from `K8sWithGpuOperator` is intentional:
-`NormalizeAcceleratorName` strips vendor and memory suffixes from full GPU model names
-(e.g. `NVIDIA-A100-PCIE-80GB` → `A100`); it is not applied to quota resource names
-because there is no suffix to strip. `nvidia.com/gpu` passes through unchanged.
+`DefaultLimiter.resolveUnknownAccelerators()` auto-resolves an empty or unrecognised
+`acceleratorName` to `nvidia.com/gpu` when the namespace inventory has exactly one pool
+key. Operators do not need to set `acceleratorName` for homogeneous GPU namespaces.
+Operators switching from `K8sWithGpuOperator` must clear any stale model-specific names
+(e.g. `A100`) that no longer match the quota pool key.
 
 ---
 
@@ -324,15 +432,10 @@ fakeClient := fake.NewClientBuilder().
 | Test | Input | Expected |
 |---|---|---|
 | Single NVIDIA quota | `spec.hard["nvidia.com/gpu"]: 8` | `{"gpu-quota": {"nvidia.com/gpu": {Count:8}}}` |
-| Two quotas, same namespace | Quota A: 4 GPUs, Quota B: 4 GPUs | Two outer keys; `TypeInventory.Refresh()` aggregates to 8 |
 | No GPU entries in quota | Only CPU and memory limits | Empty map, no error |
 | `requests.nvidia.com/gpu` prefix | Prefixed hard limit: 4 | Counted as `nvidia.com/gpu: 4` |
 | Multi-vendor quota | `nvidia.com/gpu: 4`, `amd.com/gpu: 2` | Both keys present with correct counts |
 | Empty namespace | No `ResourceQuota` objects | Empty map, no error |
-
-For the two-quota case, instantiate a real `TypeInventory` (not a mock) and call
-`Refresh()` to confirm that cross-quota aggregation works end-to-end at the unit level.
-This is the only test that crosses a component boundary at unit level.
 
 #### `DiscoverUsage()` coverage
 
@@ -341,34 +444,28 @@ This is the only test that crosses a component boundary at unit level.
 | GPUs in use | `status.used["nvidia.com/gpu"]: 3` | `{"nvidia.com/gpu": 3}` |
 | No usage | `status.used` empty or absent | Empty map, no error |
 | Multi-vendor usage | Both `nvidia.com/gpu` and `amd.com/gpu` used | Both keys returned |
-| Multiple quotas | Two quotas each with partial usage | Values summed by resource name |
 
 ### Integration Tests
 
-Integration tests validate the full constraint pipeline — from `NamespaceQuotaDiscovery`
-through `TypeInventory` → `DefaultLimiter.ComputeConstraints()` → `GreedyByScoreOptimizer`
-— using a fake client and in-process components. No cluster required.
+Integration tests validate the full pipeline in-process using a fake client. No cluster
+required.
 
-**Location:** `internal/engines/pipeline/` (alongside existing `type_inventory_test.go`)
+**Pipeline — discovery → inventory → `DefaultLimiter.Limit()` (V1 path):**
 
-**Running:**
 ```bash
-go test ./internal/engines/pipeline/... -run TestQuotaConstraints
+go test ./internal/discovery/... ./internal/engines/pipeline/... -run TestQuotaLimiter
 ```
-
-#### Coverage
-
-These tests verify the discovery → inventory → constraints pipeline only. What the
-optimizer does with the constraints is tested in `greedy_score_optimizer_test.go`.
 
 | Test | What it validates |
 |---|---|
-| Hard limit read correctly | Quota `spec.hard["nvidia.com/gpu"]: 8`; `ComputeConstraints()` returns `ResourceConstraints{Pools: {"nvidia.com/gpu": {Limit:8}}}` |
-| Usage read correctly | Quota `status.used["nvidia.com/gpu"]: 3`; `ComputeConstraints()` returns `{Limit:8, Used:3}` → `Available:5` |
-| Zero hard limit | `spec.hard["nvidia.com/gpu"]: 0`; `ComputeConstraints()` returns `Available:0` |
-| Usage at limit | `status.used` equals `spec.hard`; `ComputeConstraints()` returns `Available:0` |
-| Two namespaces produce independent constraints | ns-a quota: 4 GPUs, ns-b quota: 8 GPUs; `ComputeConstraints()` called per namespace returns correct values independently |
-| Quota discovery error | `Discover()` returns an error; `ComputeConstraints()` propagates it |
+| Hard limit enforced | `spec.hard["nvidia.com/gpu"]: 4`; two VAs requesting 3 replicas each → `TargetReplicas` capped so total GPUs ≤ 4 |
+| Usage read from `status.used` | `status.used["nvidia.com/gpu"]: 3`; available = 1 → only 1 GPU worth of scale-up permitted |
+| Zero hard limit | `spec.hard["nvidia.com/gpu"]: 0` → no scale-up decisions produced |
+| Usage at limit | `status.used` equals `spec.hard` → `TargetReplicas` unchanged for all decisions |
+| Two namespaces independent | ns-a quota: 4 GPUs, ns-b quota: 8 GPUs; `NamespaceLimiter.Limit()` caps each namespace independently |
+| Unknown namespace runs unlimited | Decision in ns-c (not in limiter map) passes through unconstrained |
+| Limiter error logged, continues | One namespace's `DefaultLimiter` returns error; other namespaces are still limited |
+| Quota discovery error | `Discover()` returns error → `Limit()` propagates it, namespace runs unlimited |
 
 ### E2E Tests
 
@@ -437,12 +534,14 @@ make test-e2e-full -- --label-filter="quota-limiter"
 
 ### Monitoring Requirements
 
-- Existing `wva_available_gpus` metric continues to be emitted (populated from
-  `TypeInventory.TotalAvailable()` regardless of discovery backend).
+- `wva_available_gpus` is populated from whichever `TypeInventory` backs `e.GPULimiter`.
+  In quota mode `e.GPULimiter` is a `NamespaceLimiter` wrapping per-namespace
+  `DefaultLimiter`s; the metric will reflect the quota-backed inventory for each
+  namespace that the limiter processes.
 - Log line at `Info` level on every `Discover()` call: `"quota-based capacity discovered"`
   with `namespace`, `totalGPUs`, and `quotaCount` fields.
-- Log line at `Warning` level when `Discover()` returns an empty map for a non-empty
-  namespace (possible misconfiguration).
+- Log line at `Warning` level when `Discover()` returns an empty map for a configured
+  namespace (likely missing or misconfigured `ResourceQuota`).
 
 ### Dependencies
 
