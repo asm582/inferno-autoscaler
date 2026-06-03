@@ -38,8 +38,11 @@ interface that derives GPU capacity from Kubernetes `ResourceQuota` objects rath
 from GPU Operator node labels. When enabled via `WVA_CAPACITY_NAMESPACES=ns-a,ns-b,ns-c`,
 the engine replaces `e.GPULimiter` with a `NamespaceLimiter` that holds one quota-backed
 `DefaultLimiter` per namespace. Both the V1 (`optimizeV1`) and V2 (`optimizeV2`) paths
-consume `e.GPULimiter` and therefore enforce per-namespace quota ceilings without any
-changes to the optimizers, `DefaultLimiter`, or `TypeInventory`.
+consume `e.GPULimiter` and therefore enforce per-namespace quota ceilings with no
+changes to the optimizers or `TypeInventory`. `DefaultLimiter` gains a
+`useDiscoveredUsage` flag and a new constructor to read usage from
+`ResourceQuota.status.used` via `RefreshAll()` instead of computing it from decision
+replicas.
 
 ---
 
@@ -153,8 +156,9 @@ optimizer is addressed in a follow-up proposal.
 
 ### Overview
 
-Two new files, two small edits. No new Go interfaces, no new fields on `Engine`, no
-changes to `optimizeV1`, `DefaultLimiter`, `TypeInventory`, or any optimizer.
+Two new files, targeted edits to three existing files. No new Go interfaces, no new
+fields on `Engine`, no changes to `optimizeV1`, `TypeInventory`, or any optimizer.
+`DefaultLimiter` gains a `useDiscoveredUsage` flag and a new constructor.
 
 ```
 internal/discovery/
