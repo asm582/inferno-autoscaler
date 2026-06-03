@@ -76,13 +76,11 @@ optimizer is addressed in a follow-up proposal.
 
 ### Goals
 
-1. Add a `NamespaceQuotaDiscovery` backend that reads GPU capacity from
-   `ResourceQuota.spec.hard` and current usage from `ResourceQuota.status.used`.
-2. Plug it into the existing `CapacityDiscovery` / `UsageDiscovery` interfaces with zero
-   changes to `TypeInventory`, `DefaultLimiter`, or `GreedyByScoreOptimizer`.
-3. Support multiple namespaces via `WVA_CAPACITY_NAMESPACES=ns-a,ns-b,ns-c` — one quota
-   ceiling enforced independently per namespace.
-4. Work on any Kubernetes distribution — GKE, EKS, AKS, OpenShift, kind — without
+1. The autoscaler enforces GPU capacity limits derived from `ResourceQuota` in
+   environments where GPU Operator labels are unavailable.
+2. Multiple namespaces each have their own independently enforced GPU quota ceiling —
+   saturation in one namespace does not affect headroom in another.
+3. Works on any Kubernetes distribution — GKE, EKS, AKS, OpenShift, kind — without
    requiring GPU Operator or node-level RBAC.
 
 ### Non-Goals
@@ -520,6 +518,46 @@ make test-e2e-full -- --label-filter="quota-limiter"
 ---
 
 ## Production Readiness Review
+
+### Migration Path
+
+**Step 1 — Create `ResourceQuota` in each namespace** (if not already present):
+
+```yaml
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: gpu-quota
+  namespace: <ns>
+spec:
+  hard:
+    nvidia.com/gpu: "<N>"
+```
+
+**Step 2 — Set `WVA_CAPACITY_NAMESPACES`** on the controller Deployment and restart:
+
+```yaml
+env:
+- name: WVA_CAPACITY_NAMESPACES
+  value: "ns-a,ns-b"
+```
+
+**Step 3 — Verify** the controller logs show `"quota-based capacity discovered"` with the
+correct `namespace` and `totalGPUs` fields.
+
+**Rollback:** unset `WVA_CAPACITY_NAMESPACES` and restart. The controller reverts to
+`K8sWithGpuOperator` immediately with no state to clean up.
+
+> **Note on `acceleratorName` label:** Do not clear the
+> `inference.optimization/acceleratorName` label on VAs during migration. In quota-mode
+> environments (managed cloud, no GPU Operator), `GetAcceleratorNameFromScaleTarget()`
+> finds no GPU product labels on nodes and returns `"unknown"`, which
+> `resolveUnknownAccelerators()` maps to `nvidia.com/gpu` automatically. Clearing the
+> label on clusters migrating from `K8sWithGpuOperator` would break rollback on
+> heterogeneous clusters (A100 + H100) where the label is needed for GPU-model-aware
+> pool selection.
+
+---
 
 ### Feature Enablement and Rollback
 
