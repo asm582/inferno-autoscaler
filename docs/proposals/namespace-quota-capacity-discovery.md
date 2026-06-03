@@ -26,6 +26,7 @@ Namespace Quota Capacity Discovery
   - [Integration Tests](#integration-tests)
   - [E2E Tests](#e2e-tests)
 - [Production Readiness Review](#production-readiness-review)
+- [Deprecation Notice: VariantAutoscaling](#deprecation-notice-variantautoscaling)
 - [Drawbacks](#drawbacks)
 - [Alternatives](#alternatives)
 
@@ -120,13 +121,37 @@ optimizer is addressed in a follow-up proposal.
   labels — the quota is the single source of truth for how many GPUs can be scheduled.
   Keeping the quota aligned with actual node capacity is the operator's responsibility.
 
-- **Accelerator key is the resource name, not the model name.** `ResourceQuota` stores
-  `nvidia.com/gpu: 8`, not `NVIDIA-A100-PCIE-80GB: 8`. `TypeInventory` pools will be
-  keyed by `nvidia.com/gpu`.
+- **Accelerator key is the resource name, not the model name.** `K8sWithGpuOperator`
+  derives pool keys from GPU node labels (e.g. `NVIDIA-A100-PCIE-80GB`). `ResourceQuota`
+  carries no model information — it stores only the Kubernetes resource name:
 
-  **`VariantAutoscaling` is optional and will be deprecated.** When a VA is provided,
-  `acceleratorName` must be set explicitly so it matches the GPU resource name in the
-  `ResourceQuota` (e.g. `nvidia.com/gpu`).
+  ```yaml
+  spec:
+    hard:
+      nvidia.com/gpu: 8   # ← this string becomes the TypeInventory pool key
+  ```
+
+  `TypeInventory` pools are therefore keyed by `nvidia.com/gpu` (or `amd.com/gpu`,
+  `intel.com/gpu`). All GPUs in a namespace are treated as one undifferentiated pool.
+  Differentiating by model (A100 vs H100) within a namespace is not supported — use
+  `K8sWithGpuOperator` for heterogeneous GPU namespaces.
+
+- **`VariantAutoscaling` is optional and deprecated.** VA is the older mechanism for
+  attaching per-variant scaling configuration (`gpusPerReplica`, `acceleratorName`, etc.)
+  to a model variant. It is not required and will be removed in a future release (see
+  [Deprecation Notice](#deprecation-notice-variantautoscaling)).
+
+  When a VA is provided, `acceleratorName` must match the `TypeInventory` pool key for
+  the limiter to apply the correct GPU budget to that variant's decisions. In quota mode
+  the pool key is the resource name — `nvidia.com/gpu` — not a GPU model name like `A100`.
+  A mismatch between `acceleratorName` and the pool key causes the variant's decisions to
+  be skipped entirely (conservative: no over-allocation, but no scaling either).
+
+  In practice, operators do not need to set `acceleratorName` at all for homogeneous GPU
+  namespaces. `resolveUnknownAccelerators()` auto-resolves an empty or unrecognised value
+  to the single pool key when the namespace inventory has exactly one GPU pool. Operators
+  switching from `K8sWithGpuOperator` must clear any stale model-specific names (e.g.
+  `A100`) that no longer match the quota pool key.
 
 - **V1 usage covers all namespace workloads.** V1 reads `ResourceQuota.status.used`
   via `TypeInventory.RefreshAll()`, reflecting all GPU consumers in the namespace.
@@ -687,16 +712,37 @@ GPUs = 0 and multiple models are simultaneously saturated.
 
 ---
 
+## Deprecation Notice: VariantAutoscaling
+
+`VariantAutoscaling` (VA) is deprecated. New deployments should not create VA objects.
+Existing VA objects continue to function but will be removed in a future release.
+
+**Why deprecated:** VA predates the current scaling architecture. Its fields
+(`acceleratorName`, `gpusPerReplica`) are now expressed directly on the scale target
+spec, making the separate VA object redundant.
+
+**Impact in quota mode:** If you have existing VA objects and are switching to quota-based
+discovery, audit `acceleratorName` on each VA. Any value that was valid under
+`K8sWithGpuOperator` (e.g. `A100`, `H100`) will not match the quota pool key
+(`nvidia.com/gpu`) and must be updated or cleared. An empty `acceleratorName` is safe for
+homogeneous GPU namespaces — `resolveUnknownAccelerators()` auto-resolves it. A mismatch
+is logged as a warning; the decision is skipped (no over-allocation, but no scaling).
+
+**Migration:** Remove VA objects and configure accelerator settings on the scale target
+directly. If VA removal is not immediately feasible, set `acceleratorName: nvidia.com/gpu`
+(or the appropriate vendor resource name) before switching discovery backends.
+
+---
+
 ## Drawbacks
 
 - Introduces a second discovery backend that must be maintained alongside
   `K8sWithGpuOperator`. The risk is low: both implement the same `FullDiscovery`
   interface and the new backend is simpler (two API calls vs. three vendor-specific
   node list calls).
-- When a VA is provided, `acceleratorName` must be set or decisions for that variant will
-  be skipped. The failure mode is conservative (no over-allocation) but requires operator
-  attention. A log warning makes this diagnosable. VA itself is optional and will be
-  deprecated.
+- When a VA is provided, `acceleratorName` must match the quota pool key or the
+  variant's decisions will be skipped. The failure mode is conservative (no
+  over-allocation) but requires operator attention. A log warning makes this diagnosable.
 
 ---
 
