@@ -35,9 +35,10 @@ Namespace Quota Capacity Discovery
 
 Add `NamespaceQuotaDiscovery`, a new implementation of the existing `CapacityDiscovery`
 interface that derives GPU capacity from Kubernetes `ResourceQuota` objects rather than
-from GPU Operator node labels. When enabled, the greedy optimizer respects the quota
-hard limit as the total GPU budget for the namespace — no GPU Operator, no node-level
-access required.
+from GPU Operator node labels. When enabled via `WVA_CAPACITY_NAMESPACES=ns-a,ns-b,ns-c`,
+the engine creates one quota-backed limiter per namespace and invokes the optimizer
+separately for each namespace's models — so each namespace's quota ceiling is enforced
+independently with no optimizer changes required.
 
 ---
 
@@ -59,13 +60,25 @@ rules out a class of deployment environments:
 In each of these cases a namespace-scoped quota is both available and sufficient: the
 quota hard limit already equals the GPU capacity visible to workloads in the namespace.
 
+Beyond fixing the discovery problem, knowing a trustworthy total GPU ceiling is a
+prerequisite for a broader class of fair-share problems. Consider two models served in the
+same namespace, each initially using 10% of the cluster's GPUs. Model A's request volume
+increases 10× and scales to 90%, leaving model B at 10%. When model B's request volume
+subsequently increases 10×, the correct allocation is 50/50 — but a naive independent
+autoscaler will not rebalance: model A still has a queue, so it sees no reason to release
+GPUs. Solving this requires a redistributive optimizer that can force model A below its
+current allocation even while it is still saturated. That optimizer cannot be built without
+a reliable GPU ceiling to divide. This KEP provides that ceiling; the redistributive
+optimizer is addressed in a follow-up proposal.
+
 ### Goals
 
 1. Add a `NamespaceQuotaDiscovery` backend that reads GPU capacity from
    `ResourceQuota.spec.hard` and current usage from `ResourceQuota.status.used`.
 2. Plug it into the existing `CapacityDiscovery` / `UsageDiscovery` interfaces with zero
    changes to `TypeInventory`, `DefaultLimiter`, or `GreedyByScoreOptimizer`.
-3. Activate it via a single environment variable; the default path is unchanged.
+3. Support multiple namespaces via `WVA_CAPACITY_NAMESPACES=ns-a,ns-b,ns-c` — one quota
+   ceiling enforced independently per namespace.
 4. Work on any Kubernetes distribution — GKE, EKS, AKS, OpenShift, kind — without
    requiring GPU Operator or node-level RBAC.
 
@@ -73,7 +86,9 @@ quota hard limit already equals the GPU capacity visible to workloads in the nam
 
 - Replacing `K8sWithGpuOperator` — it remains the default and is required for
   GPU-model-aware scheduling (e.g., differentiating A100 from H100).
-- Cross-namespace capacity aggregation.
+- GPU-model-aware scheduling: all GPUs in a namespace are treated as one pool keyed by
+  resource name (e.g. `nvidia.com/gpu`). Differentiating A100 from H100 within a
+  namespace requires `K8sWithGpuOperator`.
 - Dynamic reconfiguration without a controller restart.
 - Supporting quota scopes (e.g., `BestEffort`, `Terminating`) — only the namespace-wide
   hard limit is read.
@@ -91,45 +106,19 @@ quota hard limit already equals the GPU capacity visible to workloads in the nam
 > I want the greedy optimizer to treat 8 as the total GPU budget so it does not
 > over-schedule replicas beyond what the cluster can place.
 
-**Story 2 — Multi-tenant cluster operator**
-
-> As an operator on a shared OpenShift cluster, I have namespace-admin access but
-> cannot list nodes cluster-wide. My namespace quota is the authoritative GPU limit.
-> I want WVA to read that quota rather than failing with a permissions error.
-
-**Story 3 — Quota-first operations**
+**Story 2 — Quota-first operations**
 
 > As a platform team that manages GPU capacity via quota rather than node labels,
 > I want a single source of truth: the quota. I do not want to maintain GPU Operator
 > labels in parallel.
 
-**Story 4 — Fair GPU rebalancing under shifting load**
-
-> As an ML platform engineer, I am serving model A and model B in the same namespace,
-> each initially at low request volume. Both start with 10% of the cluster's GPUs.
->
-> Model A's request volume then increases 10×. A naive per-model autoscaler would try
-> to give it 100% of GPUs, but model B is still holding its 10%, so model A ends up
-> with 90%.
->
-> Later, model B's request volume also increases 10×. Both models are now equally
-> resource-hungry. The correct allocation is 50/50. But a naive independent autoscaler
-> will not rebalance: model A still has a non-empty queue, so it sees no reason to
-> release GPUs. Model B cannot get more GPUs because model A holds them, so model B's
-> queue grows indefinitely.
->
-> I want the autoscaler to detect this imbalance — using queue size or time-in-queue as
-> the signal — and converge to a 50/50 split. The quota is the hard ceiling on total
-> GPUs; the optimizer is responsible for dividing them fairly across models whose queues
-> are equally saturated.
->
-> **Why 50/50?** Because both models have equally large queues relative to their current
-> allocation. The fair-share criterion is equal queue size (or equal time-in-queue for
-> models whose work units take different amounts of GPU time). A model holding more than
-> its fair share of GPUs while a peer is equally starved should give resources up, even
-> if it still has its own backlog to drain.
-
 ### Notes and Constraints
+
+- **Quota equals capacity.** This design treats `ResourceQuota.spec.hard` as the total
+  GPU capacity available to workloads in the namespace. No node inventory, no GPU Operator
+  labels — the quota is the single source of truth for how many GPUs can be scheduled.
+  Keeping the quota aligned with actual node capacity is the operator's responsibility,
+  the same way correct node labels are the operator's responsibility with `K8sWithGpuOperator`.
 
 - **Accelerator key is the resource name, not the model name.** `ResourceQuota` stores
   `nvidia.com/gpu: 8`, not `NVIDIA-A100-PCIE-80GB: 8`. `TypeInventory` pools will be
@@ -139,13 +128,19 @@ quota hard limit already equals the GPU capacity visible to workloads in the nam
   `acceleratorName` must be set explicitly so it matches the GPU resource name in the
   `ResourceQuota` (e.g. `nvidia.com/gpu`).
 
-- **Usage from `status.used`, not pod listing.** The Kubernetes quota admission
-  controller maintains `ResourceQuota.status.used` automatically and is the authoritative
-  source. Re-summing pod requests would be redundant and could diverge transiently.
+- **Usage from `status.used`, not pod listing.** `ResourceQuota.status.used` is
+  maintained by the quota admission controller and covers all admitted workloads in the
+  namespace — including pending pods and non-WVA workloads — whereas
+  `K8sWithGpuOperator.DiscoverUsage()` sums requests only from scheduled WVA-managed
+  pods. Both are defensible; `status.used` is the more conservative count and the natural
+  source of truth when quota is the capacity model.
 
-- **Single namespace.** The implementation reads quotas from the one namespace named in
-  `WVA_CAPACITY_NAMESPACE`. The controller may manage workloads across other namespaces
-  but capacity is governed by this one quota namespace.
+- **Each namespace's quota is enforced independently.** A `ResourceQuota` only governs
+  pods in its own namespace, so each namespace's ceiling must apply only to models running
+  in that namespace. The engine achieves this without any optimizer changes by invoking
+  the optimizer once per namespace with only that namespace's requests and constraint.
+  Models in ns-a compete for ns-a's GPU quota; models in ns-b compete for ns-b's — there
+  is no cross-namespace sharing.
 
 - **Multiple quotas are aggregated.** If a namespace has more than one `ResourceQuota`
   object each quota is treated as a separate inventory entry (outer key in the
@@ -156,7 +151,6 @@ quota hard limit already equals the GPU capacity visible to workloads in the nam
 
 | Risk | Likelihood | Impact | Mitigation |
 |---|---|---|---|
-| Quota larger than available node capacity causes pending pods | Medium | Medium | Document the requirement that quota hard limit must reflect actual node pool size. The optimizer acts conservatively: it schedules up to the quota, but Kubernetes will hold pods pending if nodes are full. |
 | `status.used` is stale immediately after quota creation | Low | Low | The admission controller updates `status.used` synchronously on pod admission; staleness is bounded by the API server response time, well within the 30-second optimization interval. |
 | VA provided without `acceleratorName` set | Low | Low | When a VA is used, `acceleratorName` must be set. The optimizer skips unresolved variants and logs a warning rather than over-allocating. VA itself is optional and will be deprecated. |
 | Mixed GPU types in one namespace share one pool | Low | Low | Documented as a known limitation. Use `K8sWithGpuOperator` for heterogeneous GPU namespaces. |
@@ -221,22 +215,57 @@ facing surface is the environment variable and the `acceleratorName` convention 
 
 ### Activation
 
-`WVA_CAPACITY_NAMESPACE` is read once in `NewEngine()`. Setting it to a non-empty
-namespace switches the discovery backend for the lifetime of the controller process.
+`WVA_CAPACITY_NAMESPACES` accepts a comma-separated list of namespaces. When set, the
+engine creates one `NamespaceQuotaDiscovery` and one `DefaultLimiter` per namespace,
+keyed by namespace name. When unset, the existing `K8sWithGpuOperator` path is used.
+
+**`NewEngine()` — build per-namespace limiters:**
 
 ```go
 // internal/engines/saturation/engine.go — NewEngine()
-var gpuDiscovery discovery.FullDiscovery
-if ns := os.Getenv("WVA_CAPACITY_NAMESPACE"); ns != "" {
-    gpuDiscovery = discovery.NewNamespaceQuotaDiscovery(client, ns)
-} else {
-    gpuDiscovery = discovery.NewK8sWithGpuOperator(client)
+var quotaLimiters map[string]*pipeline.DefaultLimiter
+if nsEnv := os.Getenv("WVA_CAPACITY_NAMESPACES"); nsEnv != "" {
+    quotaLimiters = make(map[string]*pipeline.DefaultLimiter)
+    for _, ns := range strings.Split(nsEnv, ",") {
+        ns = strings.TrimSpace(ns)
+        if ns == "" {
+            continue
+        }
+        disc := discovery.NewNamespaceQuotaDiscovery(client, ns)
+        inv  := pipeline.NewTypeInventoryWithUsage("quota-inventory-"+ns, disc)
+        quotaLimiters[ns] = pipeline.NewDefaultLimiter("quota-limiter-"+ns, inv, pipeline.NewGreedyBySaturation())
+    }
 }
-gpuInventory := pipeline.NewTypeInventoryWithUsage("cluster-gpu-inventory", gpuDiscovery)
-// remaining NewEngine() lines unchanged
+// if quotaLimiters is nil, existing K8sWithGpuOperator path is used unchanged
 ```
 
-This is the only change to `engine.go`.
+**Optimize loop — invoke optimizer once per namespace:**
+
+```go
+// internal/engines/saturation/engine.go — optimize()
+if quotaLimiters != nil {
+    byNamespace := groupRequestsByNamespace(requests)
+    for ns, nsRequests := range byNamespace {
+        var constraints []*pipeline.ResourceConstraints
+        if limiter, ok := quotaLimiters[ns]; ok {
+            usage := computeCurrentGPUUsage(nsRequests)
+            if c, err := limiter.ComputeConstraints(ctx, usage); err != nil {
+                logger.Error(err, "quota constraint failed, namespace runs unlimited", "namespace", ns)
+            } else {
+                constraints = append(constraints, c)
+            }
+        }
+        decisions := e.optimizer.Optimize(ctx, nsRequests, constraints)
+        allDecisions = append(allDecisions, decisions...)
+    }
+} else {
+    // existing global constraint path — unchanged
+}
+```
+
+The optimizer receives only the requests for one namespace at a time, so its internal
+`available` map naturally reflects that namespace's quota ceiling. No changes to
+`GreedyByScoreOptimizer` or `mergeConstraints` are required.
 
 ### Accelerator Name Convention
 
@@ -329,13 +358,17 @@ go test ./internal/engines/pipeline/... -run TestQuotaConstraints
 
 #### Coverage
 
+These tests verify the discovery → inventory → constraints pipeline only. What the
+optimizer does with the constraints is tested in `greedy_score_optimizer_test.go`.
+
 | Test | What it validates |
 |---|---|
-| Quota ceiling respected | Two models requesting more GPUs than quota allows; optimizer total allocation ≤ quota hard limit |
-| Zero quota | `nvidia.com/gpu: 0`; optimizer produces zero scale-up decisions |
-| Usage already at limit | `status.used` equals `spec.hard`; optimizer sees zero available GPUs |
-| Usage partially consumed | Available = hard − used; optimizer scales up to the remaining headroom |
-| Quota discovery error | `Discover()` returns an error; `ComputeConstraints()` propagates it; engine falls back to unlimited |
+| Hard limit read correctly | Quota `spec.hard["nvidia.com/gpu"]: 8`; `ComputeConstraints()` returns `ResourceConstraints{Pools: {"nvidia.com/gpu": {Limit:8}}}` |
+| Usage read correctly | Quota `status.used["nvidia.com/gpu"]: 3`; `ComputeConstraints()` returns `{Limit:8, Used:3}` → `Available:5` |
+| Zero hard limit | `spec.hard["nvidia.com/gpu"]: 0`; `ComputeConstraints()` returns `Available:0` |
+| Usage at limit | `status.used` equals `spec.hard`; `ComputeConstraints()` returns `Available:0` |
+| Two namespaces produce independent constraints | ns-a quota: 4 GPUs, ns-b quota: 8 GPUs; `ComputeConstraints()` called per namespace returns correct values independently |
+| Quota discovery error | `Discover()` returns an error; `ComputeConstraints()` propagates it |
 
 ### E2E Tests
 
@@ -380,16 +413,24 @@ make test-e2e-full -- --label-filter="quota-limiter"
 2. Assert the controller logs a warning but continues producing decisions
    (falls back to unlimited mode, not a crash).
 
+**Multi-namespace isolation:**
+1. Set `WVA_CAPACITY_NAMESPACES=ns-a,ns-b` with `nvidia.com/gpu: 4` in ns-a and
+   `nvidia.com/gpu: 8` in ns-b.
+2. Saturate models in both namespaces.
+3. Assert models in ns-a are capped at 4 GPUs total; models in ns-b are capped at 8.
+4. Assert ns-a saturation does not affect ns-b headroom.
+
 ---
 
 ## Production Readiness Review
 
 ### Feature Enablement and Rollback
 
-- **Enabled by:** setting `WVA_CAPACITY_NAMESPACE` on the controller Deployment.
+- **Enabled by:** setting `WVA_CAPACITY_NAMESPACES=ns-a,ns-b` on the controller Deployment.
 - **Disabled by:** unsetting the variable and restarting the controller.
 - **Rollback:** remove the env var; the controller reverts to `K8sWithGpuOperator`
   immediately on restart with no state to clean up.
+- **Adding a namespace:** append it to the comma-separated list and restart.
 - **Side effects of disabling:** the optimizer reverts to node-based capacity. If node
   capacity exceeds the quota that was previously enforced, the optimizer may produce
   larger scale-up decisions. This is expected and safe.
@@ -406,9 +447,24 @@ make test-e2e-full -- --label-filter="quota-limiter"
 ### Dependencies
 
 - No new Go module dependencies. `ResourceQuota` is `core/v1`, already imported.
-- No new RBAC beyond what the controller already holds for `resourcequotas` (get, list,
-  watch). Verify the existing `config/rbac/role.yaml` includes these verbs; add them if
-  absent.
+- **RBAC: add `resourcequotas` to `config/base/rbac/manager-clusterrole.yaml`.**
+  The controller already uses a `ClusterRole` (not a namespaced `Role`) so a single
+  addition covers all namespaces listed in `WVA_CAPACITY_NAMESPACES`. The verbs needed
+  are read-only — `get`, `list`, `watch`. The exact stanza to add:
+
+  ```yaml
+  - apiGroups:
+    - ""
+    resources:
+    - resourcequotas
+    verbs:
+    - get
+    - list
+    - watch
+  ```
+
+  `resourcequotas` is currently absent from the ClusterRole. This addition is part of
+  the implementation, not optional post-deployment verification.
 
 ### Scalability
 
@@ -420,18 +476,16 @@ make test-e2e-full -- --label-filter="quota-limiter"
 
 ---
 
-## Gap Analysis: Does This KEP Solve Story 4?
+## Relationship to Fair-Share Rebalancing
 
-**Short answer: No — not on its own.**
+This KEP delivers quota-based capacity discovery. It is a prerequisite for fair-share
+rebalancing across competing models but does not implement the rebalancing itself. This
+section documents why, so a follow-up proposal can be scoped correctly.
 
-This KEP solves Stories 1–3 (discovering GPU capacity from namespace quotas instead of GPU
-Operator node labels). Story 4 requires a different and deeper change in the optimizer.
-This section documents the gap so a follow-up proposal can be scoped correctly.
+### Why rebalancing is out of scope
 
-### Why Story 4 is not solved
-
-Tracing through the code with the concrete scenario (100 total GPUs, Model A: 90 replicas,
-Model B: 10 replicas, both queues now growing equally):
+Tracing through the concrete scenario from Motivation (100 total GPUs, Model A: 90
+replicas, Model B: 10 replicas, both queues now growing equally):
 
 1. **`computeCurrentGPUUsage`** sums current replicas for all models:
    `{"nvidia.com/gpu": 100}` (90 from A + 10 from B).
@@ -462,7 +516,7 @@ relative to its own demand). A model holding 90% of GPUs but still facing a grow
 reports `SpareCapacity = 0` — it will never voluntarily release GPUs under the current
 logic.
 
-### What Story 4 actually requires
+### What rebalancing actually requires
 
 A redistributive fair-share pass that runs before or instead of the current additive pass
 when the cluster is fully utilized:
@@ -482,18 +536,13 @@ when the cluster is fully utilized:
    Two models with equal queues should converge to equal GPU allocation. A model with a
    larger queue per GPU should get a larger share.
 
-### What this KEP contributes toward Story 4
+### What this KEP contributes
 
-This KEP is a **prerequisite** for Story 4, not a solution:
-
-- Without quota-based discovery, the optimizer cannot reliably know the total GPU ceiling
-  in managed cloud or quota-governed environments. Story 4's fair-share formula
-  (`total / N`) requires a trustworthy `total`.
-- Quota discovery provides that ceiling cleanly, without GPU Operator dependency.
-
-Story 4 should be addressed in a follow-up KEP scoped to the optimizer: introducing a
-redistributive fair-share mode that activates when available GPUs = 0 and multiple models
-are simultaneously saturated.
+The fair-share formula (`total_GPUs / N`) requires a trustworthy `total`. Without
+quota-based discovery, that total is unavailable in managed cloud and quota-governed
+environments. This KEP provides it. The redistributive optimizer that acts on it is a
+follow-up KEP scoped to the optimizer: a fair-share mode that activates when available
+GPUs = 0 and multiple models are simultaneously saturated.
 
 ---
 
@@ -528,13 +577,21 @@ Reusing that separation is the right call.
 List all pods in the namespace and sum their GPU resource requests, mirroring
 `K8sWithGpuOperator.DiscoverUsage()`.
 
-**Rejected because:** `ResourceQuota.status.used` is already the authoritative, consistent
-value maintained by the Kubernetes admission controller. Re-summing pod requests is
-redundant, requires a Pod list API call, and can diverge transiently (e.g. a pod that has
-been admitted but whose status has not yet propagated). Reading `status.used` is strictly
-simpler and more accurate.
+**Rejected because:** `status.used` is the natural source of truth when quota is the
+capacity model — it accounts for all admitted workloads, not just scheduled WVA-managed
+pods, which is the correct scope when enforcing a namespace quota ceiling.
 
-### Alternative 3 — Environment variable per GPU type
+### Alternative 3 — Single `WVA_CAPACITY_NAMESPACE` (rejected)
+
+Accept a single namespace name rather than a comma-separated list.
+
+**Rejected because:** WVA already manages models across multiple namespaces. A single-
+namespace restriction would make the feature unusable in any realistic multi-tenant
+deployment. The comma-separated approach is no more complex to implement — the engine
+loops over the list once at startup — and avoids a follow-up breaking change to add
+multi-namespace support later.
+
+### Alternative 4 — Environment variable per GPU type
 
 Allow `WVA_QUOTA_CAPACITY_NVIDIA=8`, `WVA_QUOTA_CAPACITY_AMD=4` etc. as static overrides
 without reading the actual quota.
