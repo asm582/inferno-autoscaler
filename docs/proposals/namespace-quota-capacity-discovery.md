@@ -181,8 +181,8 @@ optimizer is addressed in a follow-up proposal.
 
 ### Overview
 
-Two new files, targeted edits to three existing files. No new Go interfaces, no new
-fields on `Engine`, no changes to `optimizeV1`, `TypeInventory`, or any optimizer.
+Two new files, targeted edits to four existing files. No new exported Go interfaces,
+no new fields on `Engine`, no changes to `optimizeV1`, `TypeInventory`, or any optimizer.
 `DefaultLimiter` gains a `useDiscoveredUsage` flag and a new constructor.
 
 ```
@@ -194,6 +194,7 @@ internal/engines/pipeline/
   namespace_limiter.go         # NEW — NamespaceLimiter wrapper
   namespace_limiter_test.go    # NEW
   default_limiter.go           # EDIT — useDiscoveredUsage flag, ~20 lines
+  type_inventory.go            # EDIT — narrow NewTypeInventoryWithUsage parameter, 1 line
 
 internal/engines/saturation/
   engine.go                    # EDIT — NewEngine() only, ~15 lines
@@ -203,7 +204,11 @@ internal/engines/saturation/
 
 ### `internal/discovery/namespace_quota.go`
 
-`NamespaceQuotaDiscovery` implements `FullDiscovery` by reading `ResourceQuota` objects.
+`NamespaceQuotaDiscovery` implements `CapacityDiscovery` and `UsageDiscovery` by reading
+`ResourceQuota` objects. It does not implement `NodeDiscovery` — quota objects carry no
+per-node information, so there is nothing to return. `NewTypeInventoryWithUsage` is
+narrowed (see below) to accept only the two interfaces it actually uses, so no stub
+`DiscoverNodes` method is needed.
 
 **`Discover(ctx) → map[quotaName]map[resourceName]AcceleratorModelInfo`**
 
@@ -217,10 +222,6 @@ internal/engines/saturation/
 Lists `ResourceQuotaList` and sums `Status.Used` values per canonical GPU resource.
 Called by both V1 and V2 via `TypeInventory.RefreshAll()` — see `default_limiter.go`
 changes below.
-
-**`DiscoverNodes(ctx) → map[string]NodeInfo`**
-
-Returns an empty map — no per-node data in quota-based discovery.
 
 **`gpuResourceName(res string) string`**
 
@@ -249,7 +250,8 @@ func gpuResourceName(res string) string {
 | `requests.intel.com/gpu` | `intel.com/gpu` (prefix stripped) |
 
 ```go
-var _ FullDiscovery = (*NamespaceQuotaDiscovery)(nil)
+var _ discovery.CapacityDiscovery = (*NamespaceQuotaDiscovery)(nil)
+var _ discovery.UsageDiscovery    = (*NamespaceQuotaDiscovery)(nil)
 ```
 
 ---
@@ -282,22 +284,77 @@ var _ Limiter = (*NamespaceLimiter)(nil)
 
 ---
 
+### `internal/engines/pipeline/type_inventory.go` — narrow constructor parameter
+
+`NewTypeInventoryWithUsage` currently accepts `discovery.FullDiscovery`, but `TypeInventory`
+only stores and calls `CapacityDiscovery` and `UsageDiscovery` — it never calls
+`DiscoverNodes`. The parameter is narrowed to a consumer-side interface defined locally
+in the `pipeline` package:
+
+```go
+// quotaInventorySource is the narrow contract NewTypeInventoryWithUsage actually needs.
+// Defined here (consumer side) so the discovery package does not dictate the shape.
+type quotaInventorySource interface {
+    discovery.CapacityDiscovery
+    discovery.UsageDiscovery
+}
+
+func NewTypeInventoryWithUsage(name string, disc quotaInventorySource) *TypeInventory {
+```
+
+Both `K8sWithGpuOperator` and `NamespaceQuotaDiscovery` satisfy `quotaInventorySource`
+with no changes — they both implement `Discover` and `DiscoverUsage`. The single existing
+call site in `engine.go` passes a `*K8sWithGpuOperator`, which still compiles unchanged.
+
+---
+
 ### `internal/engines/pipeline/default_limiter.go` — `useDiscoveredUsage` flag
 
 Add a `useDiscoveredUsage` flag and a new constructor. When set, `Limit()` and
-`ComputeConstraints()` call `TypeInventory.RefreshAll()` instead of `Refresh()` +
+`ComputeConstraints()` call `RefreshAll()` instead of `Refresh()` +
 `calculateUsedGPUs()`/`SetUsed()`. `RefreshAll()` calls both `Discover()` (reads
 `spec.hard`) and `DiscoverUsage()` (reads `status.used`) in one pass — covering all
 GPU workloads in the namespace, not just WVA-managed ones.
+
+Define a consumer-side interface at the top of `default_limiter.go` for the narrow
+behavior `DefaultLimiter` needs in the `useDiscoveredUsage` path:
+
+```go
+// fullRefreshInventory is the narrow contract required by the useDiscoveredUsage path.
+// Defined on the consumer side so DefaultLimiter is not coupled to *TypeInventory.
+type fullRefreshInventory interface {
+    Inventory
+    RefreshAll(ctx context.Context) error
+}
+```
+
+`DefaultLimiter` gains a dedicated `refresher` field (set only when
+`useDiscoveredUsage=true`) so `Limit()` and `ComputeConstraints()` call the interface
+directly — no type assertions anywhere:
+
+```go
+type DefaultLimiter struct {
+    name               string
+    inventory          Inventory
+    refresher          fullRefreshInventory // non-nil iff useDiscoveredUsage; same value as inventory
+    algorithm          AllocationAlgorithm
+    metricsEmitter     *metrics.MetricsEmitter
+    useDiscoveredUsage bool
+}
+```
+
+`NewDefaultLimiterWithDiscoveredUsage` accepts `fullRefreshInventory`, satisfying the
+contract at compile time and storing it in both fields:
 
 ```go
 // NewDefaultLimiterWithDiscoveredUsage creates a limiter that reads usage from
 // DiscoverUsage() (ResourceQuota.status.used) instead of computing it from
 // decision replicas. Use for quota-backed inventories.
-func NewDefaultLimiterWithDiscoveredUsage(name string, inventory *TypeInventory, algorithm AllocationAlgorithm) *DefaultLimiter {
+func NewDefaultLimiterWithDiscoveredUsage(name string, inventory fullRefreshInventory, algorithm AllocationAlgorithm) *DefaultLimiter {
     return &DefaultLimiter{
         name:               name,
         inventory:          inventory,
+        refresher:          inventory,
         algorithm:          algorithm,
         metricsEmitter:     metrics.NewMetricsEmitter(),
         useDiscoveredUsage: true,
@@ -305,15 +362,17 @@ func NewDefaultLimiterWithDiscoveredUsage(name string, inventory *TypeInventory,
 }
 ```
 
+`TypeInventory` satisfies `fullRefreshInventory` — it implements `Inventory` and has
+`RefreshAll`. The existing `NewDefaultLimiter` constructor leaves `refresher` nil and
+`useDiscoveredUsage` false; it is unchanged.
+
 **`Limit()` — replace the first two steps:**
 
 ```go
 if l.useDiscoveredUsage {
     // reads spec.hard (capacity) + status.used (usage) in one call
-    if inv, ok := l.inventory.(*TypeInventory); ok {
-        if err := inv.RefreshAll(ctx); err != nil {
-            return fmt.Errorf("failed to refresh quota inventory: %w", err)
-        }
+    if err := l.refresher.RefreshAll(ctx); err != nil {
+        return fmt.Errorf("failed to refresh quota inventory: %w", err)
     }
 } else {
     if err := l.inventory.Refresh(ctx); err != nil {
@@ -327,10 +386,8 @@ if l.useDiscoveredUsage {
 
 ```go
 if l.useDiscoveredUsage {
-    if inv, ok := l.inventory.(*TypeInventory); ok {
-        if err := inv.RefreshAll(ctx); err != nil {
-            return nil, fmt.Errorf("failed to refresh quota inventory: %w", err)
-        }
+    if err := l.refresher.RefreshAll(ctx); err != nil {
+        return nil, fmt.Errorf("failed to refresh quota inventory: %w", err)
     }
 } else {
     if err := l.inventory.Refresh(ctx); err != nil {
