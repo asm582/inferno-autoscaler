@@ -95,6 +95,7 @@ optimizer is addressed in a follow-up proposal.
 - Dynamic reconfiguration without a controller restart.
 - Supporting quota scopes (e.g., `BestEffort`, `Terminating`) — only the namespace-wide
   hard limit is read.
+- Supporting TPUs due to differences in acquiring resources.
 
 ---
 
