@@ -75,7 +75,7 @@ subsequently increases 10×, the correct allocation is 50/50 — but a naive ind
 autoscaler will not rebalance: model A still has a queue, so it sees no reason to release
 GPUs. Solving this requires a redistributive optimizer that can force model A below its
 current allocation even while it is still saturated. That optimizer cannot be built without
-a reliable GPU ceiling to divide. This KEP provides that ceiling; the redistributive
+a reliable GPU ceiling to divide. This proposal provides that ceiling; the redistributive
 optimizer is addressed in a follow-up proposal.
 
 ### Goals
@@ -696,13 +696,13 @@ correct `namespace` and `totalGPUs` fields.
   30 seconds). A namespace with N quotas returns N objects in a single list response.
   This is strictly less expensive than the current `listGPUNodes()` which issues one
   API call per GPU vendor.
-- No watch caching is added in this KEP; the existing client cache handles list responses.
+- No watch caching is added in this proposal; the existing client cache handles list responses.
 
 ---
 
 ## Relationship to Fair-Share Rebalancing
 
-This KEP delivers quota-based capacity discovery. It is a prerequisite for fair-share
+This proposal delivers quota-based capacity discovery. It is a prerequisite for fair-share
 rebalancing across competing models but does not implement the rebalancing itself. This
 section documents why, so a follow-up proposal can be scoped correctly.
 
@@ -760,12 +760,12 @@ when the cluster is fully utilized:
    Two models with equal queues should converge to equal GPU allocation. A model with a
    larger queue per GPU should get a larger share.
 
-### What this KEP contributes
+### What this proposal contributes
 
 The fair-share formula (`total_GPUs / N`) requires a trustworthy `total`. Without
 quota-based discovery, that total is unavailable in managed cloud and quota-governed
-environments. This KEP provides it. The redistributive optimizer that acts on it is a
-follow-up KEP scoped to the optimizer: a fair-share mode that activates when available
+environments. This proposal provides it. The redistributive optimizer that acts on it is a
+follow-up proposal scoped to the optimizer: a fair-share mode that activates when available
 GPUs = 0 and multiple models are simultaneously saturated.
 
 ---
