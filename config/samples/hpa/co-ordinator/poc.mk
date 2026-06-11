@@ -40,9 +40,7 @@ poc-install: ## [POC] Install per-model EPPs, sim workloads, gateway, and Promet
 	  -f $(POC_DIR)/model-b-epp-values.yaml
 	@echo ""
 	@echo "--- Step 4: Deploy sim workloads and gateway ---"
-	@kubectl apply -f $(POC_DIR)/model-a-decode.yaml
-	@kubectl apply -f $(POC_DIR)/model-b-decode.yaml
-	@kubectl apply -f $(POC_DIR)/multi-model-gateway.yaml
+	@kubectl apply -k $(POC_DIR)/base
 	@echo ""
 	@echo "--- Step 5: Wait for EPPs and workloads to be ready ---"
 	@echo "  Waiting for model-a-epp..."
@@ -191,8 +189,6 @@ poc-starvation: ## [POC] Reproduce GPU starvation: reset → phase-1 model-a loa
 	@echo "================================================================"
 	@echo ""
 	@echo "--- Step 1: Reset to clean state ---"
-	@echo "  Applying GPU ResourceQuota (Coordinator needs budget; HPAs will lack pool annotation so it skips them)..."
-	@kubectl apply -f $(POC_DIR)/llm-d-sim-gpu-quota.yaml 2>/dev/null
 	@echo "  Removing stale load jobs..."
 	@kubectl delete job starvation-load-a starvation-load-b \
 	  -n $(POC_NS) --ignore-not-found=true 2>/dev/null; true
@@ -215,12 +211,8 @@ poc-starvation: ## [POC] Reproduce GPU starvation: reset → phase-1 model-a loa
 	    echo "  [$$T""s] waiting... model-a=$$A model-b=$$B"; \
 	    sleep 5; \
 	  done
-	@echo "  Deploying starvation HPAs (maxReplicas=10, scaleDown.stabilization=3600s)..."
-	@kubectl apply -f $(POC_DIR)/model-a-hpa.yaml
-	@kubectl apply -f $(POC_DIR)/model-b-hpa.yaml
-	@echo "  Removing epp-inference-pool annotation (Coordinator skips HPAs without it)..."
-	@kubectl annotate hpa model-a-hpa model-b-hpa -n $(POC_NS) \
-	  llm-d.ai/epp-inference-pool- --overwrite 2>/dev/null; true
+	@echo "  Applying base state (quota + HPAs without coordinator annotation)..."
+	@kubectl apply -k $(POC_DIR)/base
 	@echo ""
 	@echo "--- Baseline (1 pod each, 2/10 GPUs used) ---"
 	@kubectl get hpa -n $(POC_NS) \
@@ -313,12 +305,9 @@ poc-rebalance: ## [POC] Apply Coordinator + GPU quota → watch rebalancing reso
 	  echo "  Pending model pods: $$PEND"
 	@echo ""
 	@echo "--- Step 1: Activate Coordinator for these HPAs ---"
-	@echo "  Adding epp-inference-pool annotation — Coordinator picks up HPAs on next 15s tick"
-	@kubectl annotate hpa model-a-hpa -n $(POC_NS) \
-	  llm-d.ai/epp-inference-pool=model-a --overwrite
-	@kubectl annotate hpa model-b-hpa -n $(POC_NS) \
-	  llm-d.ai/epp-inference-pool=model-b --overwrite
-	@echo "  ResourceQuota (applied during starvation, still in effect):"
+	@echo "  Applying rebalance overlay — adds epp-inference-pool annotation to both HPAs"
+	@kubectl apply -k $(POC_DIR)/overlays/rebalance
+	@echo "  ResourceQuota (still in effect from starvation):"
 	@kubectl get resourcequota -n $(POC_NS)
 	@echo ""
 	@echo "--- Step 2: Coordinator config (should show EXPERIMENTAL_COORDINATOR_ENABLED: \"true\") ---"
