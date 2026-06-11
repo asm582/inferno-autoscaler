@@ -157,17 +157,31 @@ The `llm-d.ai/epp-inference-pool` annotation on each HPA is the on/off gate:
 
 ## Files
 
+### Kustomize base (`base/`)
+
+| File | Purpose |
+|---|---|
+| `base/kustomization.yaml` | Lists all base resources |
+| `base/model-a-hpa.yaml` | HPA for model-a — no `epp-inference-pool` annotation (starvation state) |
+| `base/model-b-hpa.yaml` | HPA for model-b — no `epp-inference-pool` annotation (starvation state) |
+| `base/model-a-decode.yaml` | llm-d-sim Deployment + Service for model-a |
+| `base/model-b-decode.yaml` | llm-d-sim Deployment + Service for model-b |
+| `base/multi-model-gateway.yaml` | nginx path-based gateway (port 9002) |
+| `base/llm-d-sim-gpu-quota.yaml` | ResourceQuota: requests.nvidia.com/gpu=10 |
+
+### Kustomize overlay (`overlays/rebalance/`)
+
+| File | Purpose |
+|---|---|
+| `overlays/rebalance/kustomization.yaml` | Applies base + patches `epp-inference-pool` annotation onto both HPAs |
+
+### Top-level
+
 | File | Purpose |
 |---|---|
 | `model-a-epp-values.yaml` | GAIE standalone Helm values for model-a EPP |
 | `model-b-epp-values.yaml` | GAIE standalone Helm values for model-b EPP |
-| `model-a-decode.yaml` | llm-d-sim Deployment + Service for model-a |
-| `model-b-decode.yaml` | llm-d-sim Deployment + Service for model-b |
-| `model-a-hpa.yaml` | HPA for model-a (scaleDown.stabilizationWindowSeconds: 120) |
-| `model-b-hpa.yaml` | HPA for model-b (scaleDown.stabilizationWindowSeconds: 120) |
-| `multi-model-gateway.yaml` | nginx path-based gateway (port 9002) |
 | `prometheus-adapter-epp-rules.yaml` | Adapter rules: EPP queue → external metrics |
-| `llm-d-sim-gpu-quota.yaml` | ResourceQuota: requests.nvidia.com/gpu=10 |
 | `starvation-load-a.yaml` | Load job for model-a |
 | `starvation-load-b.yaml` | Load job for model-b |
 | `poc.mk` | All make targets for this POC |
