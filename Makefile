@@ -368,11 +368,16 @@ benchmark-standup: ## Stand up the benchmark environment (set BENCHMARK_NAMESPAC
 	   $(BENCHMARK_REPO_DIR)/config/scenarios/guides/workload-autoscaling.yaml; \
 	exit $$rc
 
-# Files patched in the cloned benchmark repo at run-time; restored by git checkout after each run.
-_BENCHMARK_PATCHED_FILES = \
-	workload/harnesses/guidellm-llm-d-benchmark.sh \
-	config/templates/jinja/20_harness_pod.yaml.j2 \
+# step_06_create_profile_configmap.py is always patched: kubectl apply without
+# --server-side exceeds the 262 KB last-applied-configuration annotation limit
+# for all guidellm runs, not just replay workloads.
+_BENCHMARK_PATCHED_FILES_ALWAYS = \
 	llmdbenchmark/run/steps/step_06_create_profile_configmap.py
+
+# Additional files patched only when BENCHMARK_REPLAY_SUPPORT=true.
+_BENCHMARK_PATCHED_FILES_REPLAY = \
+	workload/harnesses/guidellm-llm-d-benchmark.sh \
+	config/templates/jinja/20_harness_pod.yaml.j2
 
 .PHONY: benchmark-run
 benchmark-run: ## Run a single benchmark workload (set BENCHMARK_NAMESPACE=<namespace>, MODEL_ID=<model>)
@@ -380,12 +385,13 @@ benchmark-run: ## Run a single benchmark workload (set BENCHMARK_NAMESPACE=<name
 		echo "ERROR: BENCHMARK_NAMESPACE is required. Usage: make benchmark-run BENCHMARK_NAMESPACE=<namespace>"; \
 		exit 1; \
 	fi
-	@if [ "$(BENCHMARK_REPLAY_SUPPORT)" = "true" ]; then \
-		git -C "$(BENCHMARK_REPO_DIR)" checkout -- $(_BENCHMARK_PATCHED_FILES) 2>/dev/null || true; \
+	@git -C "$(BENCHMARK_REPO_DIR)" checkout -- $(_BENCHMARK_PATCHED_FILES_ALWAYS) 2>/dev/null || true; \
+	git -C "$(BENCHMARK_REPO_DIR)" apply "$(CURDIR)/hack/benchmark/patches/step_06_create_profile_configmap.py.patch" || exit 1; \
+	if [ "$(BENCHMARK_REPLAY_SUPPORT)" = "true" ]; then \
+		git -C "$(BENCHMARK_REPO_DIR)" checkout -- $(_BENCHMARK_PATCHED_FILES_REPLAY) 2>/dev/null || true; \
 		cp "$(CURDIR)/hack/benchmark/harnesses/guidellm-llm-d-benchmark.sh" \
 		   "$(BENCHMARK_REPO_DIR)/workload/harnesses/guidellm-llm-d-benchmark.sh"; \
 		git -C "$(BENCHMARK_REPO_DIR)" apply "$(CURDIR)/hack/benchmark/patches/20_harness_pod.yaml.j2.patch" || exit 1; \
-		git -C "$(BENCHMARK_REPO_DIR)" apply "$(CURDIR)/hack/benchmark/patches/step_06_create_profile_configmap.py.patch" || exit 1; \
 	fi; \
 	if [ -f "$(BENCHMARK_SCENARIOS_DIR)/$(BENCHMARK_WORKLOAD)" ]; then \
 		cp "$(BENCHMARK_SCENARIOS_DIR)/$(BENCHMARK_WORKLOAD)" \
@@ -405,8 +411,9 @@ benchmark-run: ## Run a single benchmark workload (set BENCHMARK_NAMESPACE=<name
 		$(if $(filter true,$(BENCHMARK_ANALYZE)),--analyze,) \
 		$(if $(filter true,$(BENCHMARK_SKIP)),--skip,); \
 	rc=$$?; \
+	git -C "$(BENCHMARK_REPO_DIR)" checkout -- $(_BENCHMARK_PATCHED_FILES_ALWAYS) 2>/dev/null || true; \
 	if [ "$(BENCHMARK_REPLAY_SUPPORT)" = "true" ]; then \
-		git -C "$(BENCHMARK_REPO_DIR)" checkout -- $(_BENCHMARK_PATCHED_FILES) 2>/dev/null || true; \
+		git -C "$(BENCHMARK_REPO_DIR)" checkout -- $(_BENCHMARK_PATCHED_FILES_REPLAY) 2>/dev/null || true; \
 	fi; \
 	exit $$rc
 
