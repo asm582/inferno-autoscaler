@@ -21,7 +21,19 @@ fi
 
 pushd "${LLMDBENCH_RUN_WORKSPACE_DIR}/profiles/guidellm" > /dev/null 2>&1
 _WORKLOAD_FILE="${LLMDBENCH_RUN_WORKSPACE_DIR}/profiles/guidellm/${LLMDBENCH_RUN_EXPERIMENT_HARNESS_WORKLOAD_NAME}"
-_TARGET=$(yq -r .target "${_WORKLOAD_FILE}")
+
+# Resolve a REPLACE_ENV_<VAR> placeholder to the named env var's value.
+_resolve_env() {
+  local val="$1"
+  if [[ "${val}" == REPLACE_ENV_* ]]; then
+    local envvar="${val#REPLACE_ENV_}"
+    echo "${!envvar}"
+  else
+    echo "${val}"
+  fi
+}
+
+_TARGET=$(_resolve_env "$(yq -r .target "${_WORKLOAD_FILE}")")
 _MAX_SECONDS=$(yq -r '.max_seconds // empty' "${_WORKLOAD_FILE}")
 _MAX_SECONDS_ARG=${_MAX_SECONDS:+--max-seconds ${_MAX_SECONDS}}
 # Extract profile as JSON so guidellm's parse_arguments correctly deserialises it.
