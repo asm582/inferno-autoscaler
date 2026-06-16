@@ -35,7 +35,6 @@ E2E_WVA_SECONDARY_OVERLAY_PATH ?= $(CURDIR)/test/e2e/testdata/secondary-controll
 BENCHMARK_REPO_URL   ?= https://github.com/llm-d/llm-d-benchmark.git
 BENCHMARK_REPO_DIR   ?= $(CURDIR)/llm-d-benchmark
 BENCHMARK_REPO_REF   ?= v0.6.3
-# TODO: verify benchmark repo guide path for v0.7.0 (was guides/inference-scheduling-wva)
 BENCHMARK_SPEC       ?= guides/workload-autoscaling
 BENCHMARK_NAMESPACE  ?= # set via BENCHMARK_NAMESPACE=<namespace>
 BENCHMARK_GATEWAY_URL ?= http://infra-llmdbench-inference-gateway-istio.$(BENCHMARK_NAMESPACE).svc.cluster.local:80
@@ -44,7 +43,15 @@ BENCHMARK_HARNESS    ?= guidellm
 BENCHMARK_WORKLOAD   ?= prefill_heavy.yaml
 BENCHMARK_FORCE      ?= true
 BENCHMARK_MONITORING ?= true
+BENCHMARK_ANALYZE    ?= true
+BENCHMARK_SKIP       ?= false
 BENCHMARK_UV         ?= false
+# Set to true for workloads that use the guidellm 'replay' profile (e.g. prefill_heavy_gamma).
+# Applies the harness and pod-template patches from hack/benchmark/ and injects
+# GUIDELLM_REPLAY_COMMIT so the harness pod upgrades guidellm at startup.
+BENCHMARK_REPLAY_SUPPORT ?= false
+# guidellm commit that adds replay profile support (not yet in any PyPI release).
+GUIDELLM_REPLAY_COMMIT ?= 73d91f311bd9
 BENCHMARK_SCENARIOS_DIR ?= $(CURDIR)/test/benchmark/scenarios
 BENCHMARK_MODEL_ID   ?= $(MODEL_ID)
 
@@ -351,15 +358,21 @@ benchmark-standup: ## Stand up the benchmark environment (set BENCHMARK_NAMESPAC
 	fi
 	@echo "Injecting PYTORCH_ALLOC_CONF into scenario YAML..."
 	@sed -i.bak 's/extraEnvVars: \[\]/extraEnvVars:\n        - name: PYTORCH_ALLOC_CONF\n          value: "expandable_segments:True"/' \
-		$(BENCHMARK_REPO_DIR)/config/scenarios/guides/inference-scheduling-wva.yaml
+		$(BENCHMARK_REPO_DIR)/config/scenarios/guides/workload-autoscaling.yaml
 	$(LLMDBENCHMARK) $(BENCHMARK_CLI_FLAGS) standup \
 		-p $(BENCHMARK_NAMESPACE) \
 		$(if $(BENCHMARK_MODEL_ID),-m $(BENCHMARK_MODEL_ID),) \
 		$(if $(filter true,$(BENCHMARK_MONITORING)),--monitoring,); \
 	rc=$$?; \
-	mv $(BENCHMARK_REPO_DIR)/config/scenarios/guides/inference-scheduling-wva.yaml.bak \
-	   $(BENCHMARK_REPO_DIR)/config/scenarios/guides/inference-scheduling-wva.yaml; \
+	mv $(BENCHMARK_REPO_DIR)/config/scenarios/guides/workload-autoscaling.yaml.bak \
+	   $(BENCHMARK_REPO_DIR)/config/scenarios/guides/workload-autoscaling.yaml; \
 	exit $$rc
+
+# Files patched in the cloned benchmark repo at run-time; restored by git checkout after each run.
+_BENCHMARK_PATCHED_FILES = \
+	workload/harnesses/guidellm-llm-d-benchmark.sh \
+	config/templates/jinja/20_harness_pod.yaml.j2 \
+	llmdbenchmark/run/steps/step_06_create_profile_configmap.py
 
 .PHONY: benchmark-run
 benchmark-run: ## Run a single benchmark workload (set BENCHMARK_NAMESPACE=<namespace>, MODEL_ID=<model>)
@@ -367,16 +380,35 @@ benchmark-run: ## Run a single benchmark workload (set BENCHMARK_NAMESPACE=<name
 		echo "ERROR: BENCHMARK_NAMESPACE is required. Usage: make benchmark-run BENCHMARK_NAMESPACE=<namespace>"; \
 		exit 1; \
 	fi
-	@if [ -f "$(BENCHMARK_SCENARIOS_DIR)/$(BENCHMARK_WORKLOAD)" ]; then \
+	@if [ "$(BENCHMARK_REPLAY_SUPPORT)" = "true" ]; then \
+		git -C "$(BENCHMARK_REPO_DIR)" checkout -- $(_BENCHMARK_PATCHED_FILES) 2>/dev/null || true; \
+		cp "$(CURDIR)/hack/benchmark/harnesses/guidellm-llm-d-benchmark.sh" \
+		   "$(BENCHMARK_REPO_DIR)/workload/harnesses/guidellm-llm-d-benchmark.sh"; \
+		git -C "$(BENCHMARK_REPO_DIR)" apply "$(CURDIR)/hack/benchmark/patches/20_harness_pod.yaml.j2.patch" || exit 1; \
+		git -C "$(BENCHMARK_REPO_DIR)" apply "$(CURDIR)/hack/benchmark/patches/step_06_create_profile_configmap.py.patch" || exit 1; \
+	fi; \
+	if [ -f "$(BENCHMARK_SCENARIOS_DIR)/$(BENCHMARK_WORKLOAD)" ]; then \
 		cp "$(BENCHMARK_SCENARIOS_DIR)/$(BENCHMARK_WORKLOAD)" \
 		   "$(BENCHMARK_REPO_DIR)/workload/profiles/$(BENCHMARK_HARNESS)/$(BENCHMARK_WORKLOAD)"; \
-	fi
+		_base="$$(basename $(BENCHMARK_WORKLOAD) .yaml)_trace.jsonl"; \
+		_trace="$(BENCHMARK_SCENARIOS_DIR)/$$_base"; \
+		[ ! -f "$$_trace" ] && _trace="$(BENCHMARK_SCENARIOS_DIR)/traces/$$_base"; \
+		[ -f "$$_trace" ] && cp "$$_trace" "$(BENCHMARK_REPO_DIR)/workload/profiles/$(BENCHMARK_HARNESS)/" || true; \
+	fi; \
+	$(if $(filter true,$(BENCHMARK_REPLAY_SUPPORT)),LLMDBENCH_GUIDELLM_REPLAY_COMMIT="$(GUIDELLM_REPLAY_COMMIT)",) \
 	$(LLMDBENCHMARK) $(BENCHMARK_CLI_FLAGS) run \
 		-p $(BENCHMARK_NAMESPACE) \
 		-l $(BENCHMARK_HARNESS) \
 		-w $(BENCHMARK_WORKLOAD) \
 		$(if $(BENCHMARK_MODEL_ID),-m $(BENCHMARK_MODEL_ID),) \
-		$(if $(filter true,$(BENCHMARK_MONITORING)),--monitoring,)
+		$(if $(filter true,$(BENCHMARK_MONITORING)),--monitoring,) \
+		$(if $(filter true,$(BENCHMARK_ANALYZE)),--analyze,) \
+		$(if $(filter true,$(BENCHMARK_SKIP)),--skip,); \
+	rc=$$?; \
+	if [ "$(BENCHMARK_REPLAY_SUPPORT)" = "true" ]; then \
+		git -C "$(BENCHMARK_REPO_DIR)" checkout -- $(_BENCHMARK_PATCHED_FILES) 2>/dev/null || true; \
+	fi; \
+	exit $$rc
 
 BURSTY_WORKLOAD    ?= bursty.yaml
 BENCHMARK_WAIT_TIMEOUT ?= 7200

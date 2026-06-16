@@ -1,0 +1,13 @@
+diff --git a/llmdbenchmark/run/steps/step_06_create_profile_configmap.py b/llmdbenchmark/run/steps/step_06_create_profile_configmap.py
+index fd1dda9..65e6697 100644
+--- a/llmdbenchmark/run/steps/step_06_create_profile_configmap.py
++++ b/llmdbenchmark/run/steps/step_06_create_profile_configmap.py
+@@ -201,6 +201,8 @@ class CreateProfileConfigmapStep(Step):
+ 
+         result = cmd.kube(
+             "apply", "-f", str(cm_yaml_path),
++            "--server-side", "--field-manager", "llmdbenchmark",
++            "--force-conflicts",
+             "--namespace", namespace,
+             check=False,
+         )

@@ -1,0 +1,14 @@
+target: REPLACE_ENV_LLMDBENCH_HARNESS_STACK_ENDPOINT_URL
+model: REPLACE_ENV_LLMDBENCH_DEPLOY_CURRENT_MODEL
+name: "Prefill Heavy (Gamma)"
+description: "Stress-tests prefill with Gamma-distributed arrivals (k=1.0, Poisson-equivalent)"
+request_type: text_completions
+profile:
+  kind: replay
+max_seconds: 600
+data:
+  kind: trace_synthetic
+  path: prefill_heavy_gamma_trace.jsonl
+  timestamp_column: timestamp
+  prompt_tokens_column: input_length
+  output_tokens_column: output_length

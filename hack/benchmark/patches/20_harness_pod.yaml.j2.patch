@@ -1,0 +1,13 @@
+diff --git a/config/templates/jinja/20_harness_pod.yaml.j2 b/config/templates/jinja/20_harness_pod.yaml.j2
+index 2471a6d..2aec8dc 100644
+--- a/config/templates/jinja/20_harness_pod.yaml.j2
++++ b/config/templates/jinja/20_harness_pod.yaml.j2
+@@ -20,7 +20,7 @@ spec:
+       runAsUser: 0
+     command: ["sh", "-c"]
+     args:
+-    - "{{ harness_command }}"
++    - "cp /workspace/harnesses/*.sh /usr/local/bin/ 2>/dev/null; chmod +x /usr/local/bin/*.sh 2>/dev/null; {{ harness_command }}"
+     resources:
+       limits:
+         cpu: "{{ harness.resources.cpu }}"
