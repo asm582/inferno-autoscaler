@@ -508,3 +508,113 @@ func TestCalculatesaturationTargets_MetricsMismatchBlocksScaling(t *testing.T) {
 		t.Errorf("expected v2-cheap target=2 (blocked by model transition), got %d", targets["v2-cheap"])
 	}
 }
+
+// TestAnalyzeModelSaturation_EPPRoutingEffect documents the V1 analyzer's behaviour
+// when an intelligent router (EPP) concentrates traffic on a subset of pods.
+//
+// EPP picks the replica with the lowest KV cache usage for each new request.
+// After WVA adds a replica the new pod starts cold (kv≈0).  EPP preferentially
+// routes to it, so the hot pod stays saturated while the cold pod accumulates
+// load slowly.  The V1 analyzer computes avgSpareKv only over NON-saturated
+// replicas, so the cold pod's ample spare capacity dominates the average and
+// suppresses scale-up — even though one pod is fully saturated.
+//
+// Key threshold: scale-up resumes only when the cold pod's KV usage exceeds
+//
+//	coldPodKv > kvCacheThreshold - kvSpareTrigger  →  0.80 - 0.10 = 0.70
+//
+// Below that threshold the cold pod's spare keeps avgSpareKv ≥ kvSpareTrigger
+// and no additional replica is recommended.
+func TestAnalyzeModelSaturation_EPPRoutingEffect(t *testing.T) {
+	analyzer := NewAnalyzer()
+	cfg := config.SaturationScalingConfig{
+		KvCacheThreshold:     0.80,
+		QueueLengthThreshold: 50,
+		KvSpareTrigger:       0.10,
+		QueueSpareTrigger:    3,
+	}
+
+	tests := []struct {
+		name        string
+		metrics     []interfaces.ReplicaMetrics
+		wantScaleUp bool
+		// description explains the V1 math for each case
+		description string
+	}{
+		{
+			name: "1 hot pod alone - scale-up fires (baseline)",
+			metrics: []interfaces.ReplicaMetrics{
+				{PodName: "pod-1", VariantName: "v1", KvCacheUsage: 0.95},
+			},
+			wantScaleUp: true,
+			description: "nonSaturatedCount=0 → avgSpareKv=0 < 0.10 → scale-up",
+		},
+		{
+			name: "1 hot (0.95) + 1 cold (0.05) - EPP just added pod-2, scale-up suppressed",
+			metrics: []interfaces.ReplicaMetrics{
+				{PodName: "pod-1", VariantName: "v1", KvCacheUsage: 0.95},
+				{PodName: "pod-2", VariantName: "v1", KvCacheUsage: 0.05},
+			},
+			wantScaleUp: false,
+			description: "pod-2 spare=0.75 dominates average → avgSpareKv=0.75 ≥ 0.10 → no scale-up despite pod-1 fully saturated",
+		},
+		{
+			name: "1 hot (0.95) + 4 cold (0.05) - multiple cold pods, scale-up still suppressed",
+			metrics: []interfaces.ReplicaMetrics{
+				{PodName: "pod-1", VariantName: "v1", KvCacheUsage: 0.95},
+				{PodName: "pod-2", VariantName: "v1", KvCacheUsage: 0.05},
+				{PodName: "pod-3", VariantName: "v1", KvCacheUsage: 0.05},
+				{PodName: "pod-4", VariantName: "v1", KvCacheUsage: 0.05},
+				{PodName: "pod-5", VariantName: "v1", KvCacheUsage: 0.05},
+			},
+			wantScaleUp: false,
+			description: "avgSpareKv=0.75 across 4 cold pods → no scale-up regardless of how many hot pods exist",
+		},
+		{
+			name: "cold pod fills to threshold boundary (kv=0.70) - scale-up still suppressed",
+			metrics: []interfaces.ReplicaMetrics{
+				{PodName: "pod-1", VariantName: "v1", KvCacheUsage: 0.95},
+				{PodName: "pod-2", VariantName: "v1", KvCacheUsage: 0.70},
+			},
+			wantScaleUp: false,
+			description: "pod-2 spare=0.10 = kvSpareTrigger (not strictly less than) → no scale-up at exact boundary",
+		},
+		{
+			name: "cold pod crosses threshold (kv=0.71) - scale-up resumes",
+			metrics: []interfaces.ReplicaMetrics{
+				{PodName: "pod-1", VariantName: "v1", KvCacheUsage: 0.95},
+				{PodName: "pod-2", VariantName: "v1", KvCacheUsage: 0.71},
+			},
+			wantScaleUp: true,
+			description: "pod-2 spare=0.09 < 0.10 → scale-up resumes once cold pod crosses kvCacheThreshold - kvSpareTrigger",
+		},
+		{
+			name: "all pods saturated (0.95) - scale-up fires (fake-metrics scenario)",
+			metrics: []interfaces.ReplicaMetrics{
+				{PodName: "pod-1", VariantName: "v1", KvCacheUsage: 0.95},
+				{PodName: "pod-2", VariantName: "v1", KvCacheUsage: 0.95},
+			},
+			wantScaleUp: true,
+			description: "nonSaturatedCount=0 → avgSpareKv=0 → scale-up (the --fake-metrics test path)",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			analysis, err := analyzer.AnalyzeModelSaturation(
+				context.Background(), "test-model", "test-ns", tt.metrics, cfg,
+			)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if analysis.ShouldScaleUp != tt.wantScaleUp {
+				t.Errorf(
+					"%s\n  want ShouldScaleUp=%v got=%v (reason=%q avgSpareKv=%.3f nonSaturated=%d)",
+					tt.description,
+					tt.wantScaleUp, analysis.ShouldScaleUp, analysis.ScaleUpReason,
+					analysis.AvgSpareKvCapacity, analysis.NonSaturatedCount,
+				)
+			}
+		})
+	}
+}
