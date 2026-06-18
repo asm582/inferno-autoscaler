@@ -32,9 +32,11 @@ E2E_MONITORING_NAMESPACE    ?= workload-variant-autoscaler-monitoring
 E2E_EMULATED_LLMD_NAMESPACE ?= llm-d-sim
 E2E_WVA_SECONDARY_OVERLAY_PATH ?= $(CURDIR)/test/e2e/testdata/secondary-controller
 # llm-d-benchmark CLI configuration
+# Ensure brew-installed tools (helm >=3.19) take precedence over Rancher Desktop
+export PATH := /opt/homebrew/bin:$(PATH)
 BENCHMARK_REPO_URL   ?= https://github.com/llm-d/llm-d-benchmark.git
 BENCHMARK_REPO_DIR   ?= $(CURDIR)/llm-d-benchmark
-BENCHMARK_REPO_REF   ?= v0.6.3
+BENCHMARK_REPO_REF   ?= v0.7.0
 BENCHMARK_SPEC       ?= guides/workload-autoscaling
 BENCHMARK_NAMESPACE  ?= # set via BENCHMARK_NAMESPACE=<namespace>
 BENCHMARK_GATEWAY_URL ?= http://infra-llmdbench-inference-gateway-istio.$(BENCHMARK_NAMESPACE).svc.cluster.local:80
@@ -326,7 +328,7 @@ test-e2e-full-with-setup:
 
 # llmdbenchmark binary from the benchmark repo venv
 BENCHMARK_VENV       = $(BENCHMARK_REPO_DIR)/.venv
-LLMDBENCHMARK        = $(BENCHMARK_VENV)/bin/llmdbenchmark
+LLMDBENCHMARK        = $(shell command -v llmdbenchmark 2>/dev/null || echo $(BENCHMARK_VENV)/bin/llmdbenchmark)
 
 # Common llmdbenchmark flags (spec + workspace + base dir for config resolution)
 BENCHMARK_CLI_FLAGS = --spec $(BENCHMARK_SPEC) --workspace $(BENCHMARK_WORKSPACE) --base-dir $(BENCHMARK_REPO_DIR)
@@ -341,6 +343,9 @@ benchmark-install: ## Clone llm-d-benchmark at BENCHMARK_REPO_REF (default v0.6.
 		cd $(BENCHMARK_REPO_DIR) && git fetch --tags && git checkout $(BENCHMARK_REPO_REF); \
 	fi
 	@cd $(BENCHMARK_REPO_DIR) && ./install.sh $(if $(filter true,$(BENCHMARK_UV)),--uv,--no-uv)
+	@echo "Upgrading helm-diff to v3.15.10 for Helm 4 compatibility..."
+	@helm plugin uninstall diff 2>/dev/null || true
+	@helm plugin install https://github.com/databus23/helm-diff --version v3.15.10 --verify=false 2>&1
 
 .PHONY: benchmark-standup
 benchmark-standup: ## Stand up the benchmark environment (set BENCHMARK_NAMESPACE=<namespace>, MODEL_ID=<model>)
@@ -366,9 +371,9 @@ benchmark-run: ## Run a single benchmark workload (set BENCHMARK_NAMESPACE=<name
 		echo "ERROR: BENCHMARK_NAMESPACE is required. Usage: make benchmark-run BENCHMARK_NAMESPACE=<namespace>"; \
 		exit 1; \
 	fi
-	@if [ -f "$(BENCHMARK_SCENARIOS_DIR)/$(BENCHMARK_WORKLOAD)" ]; then \
-		cp "$(BENCHMARK_SCENARIOS_DIR)/$(BENCHMARK_WORKLOAD)" \
-		   "$(BENCHMARK_REPO_DIR)/workload/profiles/$(BENCHMARK_HARNESS)/$(BENCHMARK_WORKLOAD)"; \
+	@if [ -f "$(BENCHMARK_SCENARIOS_DIR)/$(BENCHMARK_WORKLOAD).in" ]; then \
+		cp "$(BENCHMARK_SCENARIOS_DIR)/$(BENCHMARK_WORKLOAD).in" \
+		   "$(BENCHMARK_REPO_DIR)/workload/profiles/$(BENCHMARK_HARNESS)/$(BENCHMARK_WORKLOAD).in"; \
 	fi
 	$(LLMDBENCHMARK) $(BENCHMARK_CLI_FLAGS) run \
 		-p $(BENCHMARK_NAMESPACE) \
@@ -387,9 +392,9 @@ benchmark-run-bursty: ## Run bursty traffic benchmark using inference-perf multi
 		echo "ERROR: BENCHMARK_NAMESPACE is required. Usage: make benchmark-run-bursty BENCHMARK_NAMESPACE=<namespace>"; \
 		exit 1; \
 	fi
-	@if [ -f "$(BENCHMARK_SCENARIOS_DIR)/$(BURSTY_WORKLOAD)" ]; then \
-		cp "$(BENCHMARK_SCENARIOS_DIR)/$(BURSTY_WORKLOAD)" \
-		   "$(BENCHMARK_REPO_DIR)/workload/profiles/inference-perf/$(BURSTY_WORKLOAD)"; \
+	@if [ -f "$(BENCHMARK_SCENARIOS_DIR)/$(BURSTY_WORKLOAD).in" ]; then \
+		cp "$(BENCHMARK_SCENARIOS_DIR)/$(BURSTY_WORKLOAD).in" \
+		   "$(BENCHMARK_REPO_DIR)/workload/profiles/inference-perf/$(BURSTY_WORKLOAD).in"; \
 	fi
 	@echo "Patching harness memory to $(BENCHMARK_HARNESS_MEMORY)..."
 	@sed -i.bak 's/memory: 32Gi/memory: $(BENCHMARK_HARNESS_MEMORY)/' \
@@ -412,8 +417,8 @@ benchmark-run-all: ## Run all scenarios: teardown → standup → run per scenar
 		echo "ERROR: BENCHMARK_NAMESPACE is required. Usage: make benchmark-run-all BENCHMARK_NAMESPACE=<namespace>"; \
 		exit 1; \
 	fi
-	@for scenario in $(BENCHMARK_SCENARIOS_DIR)/*.yaml; do \
-		scenario_name=$$(basename "$$scenario"); \
+	@for scenario in $(BENCHMARK_SCENARIOS_DIR)/*.yaml.in; do \
+		scenario_name=$$(basename "$$scenario" .in); \
 		echo ""; \
 		echo "=========================================="; \
 		echo "[1/3] Tearing down before: $$scenario_name"; \
