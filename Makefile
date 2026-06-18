@@ -35,7 +35,6 @@ E2E_WVA_SECONDARY_OVERLAY_PATH ?= $(CURDIR)/test/e2e/testdata/secondary-controll
 BENCHMARK_REPO_URL   ?= https://github.com/llm-d/llm-d-benchmark.git
 BENCHMARK_REPO_DIR   ?= $(CURDIR)/llm-d-benchmark
 BENCHMARK_REPO_REF   ?= v0.6.3
-# TODO: verify benchmark repo guide path for v0.7.0 (was guides/inference-scheduling-wva)
 BENCHMARK_SPEC       ?= guides/workload-autoscaling
 BENCHMARK_NAMESPACE  ?= # set via BENCHMARK_NAMESPACE=<namespace>
 BENCHMARK_GATEWAY_URL ?= http://infra-llmdbench-inference-gateway-istio.$(BENCHMARK_NAMESPACE).svc.cluster.local:80
@@ -351,14 +350,14 @@ benchmark-standup: ## Stand up the benchmark environment (set BENCHMARK_NAMESPAC
 	fi
 	@echo "Injecting PYTORCH_ALLOC_CONF into scenario YAML..."
 	@sed -i.bak 's/extraEnvVars: \[\]/extraEnvVars:\n        - name: PYTORCH_ALLOC_CONF\n          value: "expandable_segments:True"/' \
-		$(BENCHMARK_REPO_DIR)/config/scenarios/guides/inference-scheduling-wva.yaml
+		$(BENCHMARK_REPO_DIR)/config/scenarios/guides/workload-autoscaling.yaml
 	$(LLMDBENCHMARK) $(BENCHMARK_CLI_FLAGS) standup \
 		-p $(BENCHMARK_NAMESPACE) \
 		$(if $(BENCHMARK_MODEL_ID),-m $(BENCHMARK_MODEL_ID),) \
 		$(if $(filter true,$(BENCHMARK_MONITORING)),--monitoring,); \
 	rc=$$?; \
-	mv $(BENCHMARK_REPO_DIR)/config/scenarios/guides/inference-scheduling-wva.yaml.bak \
-	   $(BENCHMARK_REPO_DIR)/config/scenarios/guides/inference-scheduling-wva.yaml; \
+	mv $(BENCHMARK_REPO_DIR)/config/scenarios/guides/workload-autoscaling.yaml.bak \
+	   $(BENCHMARK_REPO_DIR)/config/scenarios/guides/workload-autoscaling.yaml; \
 	exit $$rc
 
 .PHONY: benchmark-run
