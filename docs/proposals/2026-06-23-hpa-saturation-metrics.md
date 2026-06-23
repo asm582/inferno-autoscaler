@@ -24,8 +24,8 @@ signals.
 ## Scope
 
 This spec defines the annotation schema that identifies an HPA as using the Sat V1 HPA
-pattern and binds its metric slots to the V1 threshold pair. No new runtime component
-is introduced.
+pattern and declares which metric names in its `spec.metrics` correspond to KV cache
+and queue depth respectively. No new runtime component is introduced.
 
 ## Configuration
 
@@ -40,3 +40,64 @@ is introduced.
 
 At least one of `llm-d.ai/kv-cache-metric` or `llm-d.ai/queue-depth-metric` must be
 present.
+
+### Example
+
+Using V1 defaults (`kvCacheThreshold: 0.80`, `kvSpareTrigger: 0.10`,
+`queueLengthThreshold: 5`, `queueSpareTrigger: 3`):
+
+```yaml
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: vllm-saturation-hpa
+  namespace: <namespace>
+  annotations:
+    llm-d.ai/saturation-hpa: "true"
+    llm-d.ai/model-id: "ibm/granite-13b"
+    llm-d.ai/kv-cache-metric: "vllm_kv_cache_usage_perc"
+    llm-d.ai/queue-depth-metric: "vllm_num_requests_waiting"
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: <vllm-deployment-name>
+  minReplicas: 1
+  maxReplicas: 10
+  metrics:
+    - type: External
+      external:
+        metric:
+          name: vllm_kv_cache_usage_perc
+          selector:
+            matchLabels:
+              model_name: "ibm/granite-13b"
+        target:
+          type: AverageValue
+          averageValue: "700m"   # kvCacheThreshold(0.80) − kvSpareTrigger(0.10)
+    - type: External
+      external:
+        metric:
+          name: vllm_num_requests_waiting
+          selector:
+            matchLabels:
+              model_name: "ibm/granite-13b"
+        target:
+          type: AverageValue
+          averageValue: "2"      # queueLengthThreshold(5) − queueSpareTrigger(3)
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 0
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 180
+      selectPolicy: Max
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 300
+      selectPolicy: Min
+```
