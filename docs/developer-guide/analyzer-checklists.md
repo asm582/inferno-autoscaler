@@ -1,20 +1,20 @@
-# Analyzer Graduation Criteria
+# Analyzer checklists
 
-This document defines the benchmark-based graduation criteria that provides data for consuming new scaling analyzer into WVA and its production-readiness. The new analyzer could be expected to work with existing analyzers in turn provide value to WVA by improving latency or cost or both. the **current default analyzer's** results recorded in [`docs/benchmark.md`](../benchmark.md) in general the expectation is that the new analyzer(s) should improve over the reported baselines for specific scenarion(s) that the analyzer targets.
+This document defines the benchmark-based checklists that will enable a analyzer to be graduated. The new analyzer could be expected to work with existing analyzers in turn provide value to WVA by improving latency or cost or both. the **current default analyzer's** results recorded in [`docs/benchmark.md`](../benchmark.md) in general the expectation is that the new analyzer(s) should improve over the reported baselines for specific scenarion(s) that the analyzer targets.
 
 ## Reference Workloads
 
-Every candidate analyzer in WVA must be periodically benchmarked against scenario(s) which it plan's to improve. Benchmarking should be done using llmd components by installing Gateway and the scheduler with flow controller enabled on GPU cluster. below are few sample current scenarios.
+Every candidate analyzer in WVA must be periodically benchmarked against scenario(s) which it plan's to improve. Benchmarking should be done using llmd components by installing Gateway and the llmd request scheduler plugins with flow controller enabled on GPU cluster. below are few sample current scenarios.
 
 | Scenario | Input Tokens | Output Tokens | Request Rate | Duration |
 |---|---|---|---|---|
-| **Prefill-heavy** | 4000 | 1000 | 20 RPS (Poisson) or depends on analyzer | depends on analyzer |
-| **Decode-heavy** | 1000 | 4000 | 20 RPS (Poisson) or depends on analyzer | depends on analyzer |
-| **Symmetrical** | 1000 | 1000 | 20 RPS (Poisson) or depends on analyzer | depends on analyzer |
+| **Prefill-heavy** | 4000 | 1000 |  depends on analyzer | depends on analyzer |
+| **Decode-heavy** | 1000 | 4000 |   depends on analyzer | depends on analyzer |
+| **Symmetrical** | 1000 | 1000 |    depends on analyzer | depends on analyzer |
 
 ## Reference Environment
 
-Benchmark results are comparable when run under identical conditions, we currently run benchmark on below profile:
+Benchmark results are comparable when run under identical conditions, we currently run benchmark on below profile, for comparison it is better to use the same hardware profile:
 
 - **Hardware**: NVIDIA H100 (OpenShift cluster)
 - **Model**: The model specified in `docs/benchmark.md` (currently Qwen/Qwen3-32B)
@@ -36,15 +36,6 @@ The following metrics are collected for each benchmark run:
 | **Avg KV cache utilization** | Mean KV cache pressure — how close to memory saturation |
 | **Avg queue depth** | Mean EPP queue depth — scaling responsiveness indicator |
 
-
-## Promotion to Default
-
-Graduation allows an analyzer to exist as a selectable option. The analyzer must demonstrate improvement on **one or all** of the following without regressing any:
-
-| Improvement Target | Threshold |
-|---|---|
-| P9x TTFT reduction | > lower than current default |
-| Cost reduction | > fewer avg replicas at equal or better latency |
 
 ## Recording Results
 
