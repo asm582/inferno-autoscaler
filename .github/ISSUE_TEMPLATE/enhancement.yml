@@ -1,0 +1,99 @@
+name: Enhancement
+description: Propose a new feature or significant change to the Workload Variant Autoscaler.
+title: "[Enhancement]: "
+labels: ["enhancement"]
+assignees: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this template to propose an enhancement. Keep the issue focused on **motivation and goals** — detailed design goes in a `docs/proposals/<name>.md` file linked below.
+
+        **Lifecycle:** `Draft` → `Implementable` → `Implemented`
+
+  - type: dropdown
+    id: status
+    attributes:
+      label: Status
+      description: Current lifecycle state of this enhancement.
+      options:
+        - Draft
+        - Implementable
+        - Implemented
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      description: Which area(s) of the project does this enhancement affect?
+      multiple: true
+      options:
+        - api
+        - benchmark
+        - ci
+        - collector
+        - config
+        - coordinator
+        - engine
+        - installation
+        - inventory
+        - observability
+        - others (please specify in summary)
+    validations:
+      required: true
+
+  - type: input
+    id: summary
+    attributes:
+      label: Summary
+      description: One-line description of the enhancement.
+      placeholder: "e.g. Add support for annotation-based scaling target discovery"
+    validations:
+      required: true
+
+  - type: input
+    id: owners
+    attributes:
+      label: Main Owner(s)
+      description: Who is leading the design and implementation of this enhancement? List GitHub usernames.
+      placeholder: "@username1, @username2"
+    validations:
+      required: true
+
+  - type: input
+    id: release_target
+    attributes:
+      label: Release Target
+      description: Which release should this enhancement target? Use "Future" if it doesn't have a specific release target yet.
+      placeholder: "e.g. v0.8.0, Future"
+    validations:
+      required: true
+
+  - type: input
+    id: proposal_doc
+    attributes:
+      label: Proposal Doc
+      description: "Path to the full proposal in this repo (create and link it here once written). The proposal answers the 'why' and 'what' of the enhancement"
+      placeholder: "docs/proposals/<name>.md"
+    validations:
+      required: false
+
+  - type: input
+    id: spec_doc
+    attributes:
+      label: Spec Doc
+      description: "Path to the full specification in this repo (create and link it here once written). The spec answers the 'how' of the enhancement"
+      placeholder: "docs/specs/<name>.md or docs/superpowers/specs/<name>.md"
+    validations:
+      required: false
+
+  - type: input
+    id: plan_doc
+    attributes:
+      label: Plan Doc
+      description: "Path to the full plan in this repo (create and link it here once written). The plan answers the 'when' and 'where' of the enhancement"
+      placeholder: "docs/plans/<name>.md or docs/superpowers/plans/<name>.md"
+    validations:
+      required: false

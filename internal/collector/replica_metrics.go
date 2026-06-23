@@ -46,16 +46,19 @@ import (
 	"math"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	llmdVariantAutoscalingV1alpha1 "github.com/llm-d/llm-d-workload-variant-autoscaler/api/v1alpha1"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/collector/locator"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/collector/registration"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/collector/source"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/constants"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/controller/indexers"
 	saturation_v2 "github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/saturation_v2"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/interfaces"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/logging"
@@ -63,6 +66,9 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/saturation"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/utils"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/utils/scaletarget"
+	autoscalingv2 "k8s.io/api/autoscaling/v2"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/client-go/tools/record"
 )
 
 // ReplicaMetricsCollector collects replica-level metrics for both saturation
@@ -70,23 +76,82 @@ import (
 type ReplicaMetricsCollector struct {
 	source    source.MetricsSource
 	k8sClient client.Client
+	recorder  record.EventRecorder
+	locator   locator.PodLocator
+	// metricsAvailableState tracks whether metrics were available in the previous
+	// cycle for each VA (keyed by namespace/name). Used for edge-triggered events.
+	metricsAvailableState map[string]bool
+	mu                    sync.Mutex
 }
 
 // NewReplicaMetricsCollector creates a new replica metrics collector.
-func NewReplicaMetricsCollector(metricsSource source.MetricsSource, k8sClient client.Client) *ReplicaMetricsCollector {
+func NewReplicaMetricsCollector(metricsSource source.MetricsSource, k8sClient client.Client, recorder record.EventRecorder, podLocator locator.PodLocator) *ReplicaMetricsCollector {
 	return &ReplicaMetricsCollector{
-		source:    metricsSource,
-		k8sClient: k8sClient,
+		source:                metricsSource,
+		k8sClient:             k8sClient,
+		recorder:              recorder,
+		locator:               podLocator,
+		metricsAvailableState: make(map[string]bool),
 	}
 }
 
-// CollectReplicaMetrics collects per-replica metrics for all replicas of a model.
+// recordUnattributedReadyPodsEvent emits a Warning/UnattributedReadyPods K8s event for va.
+// Deduplication: at most one event per VA per cycle; vaEventTracker records which VAs have
+// already received an event this cycle so repeated calls are no-ops for those VAs.
+func (c *ReplicaMetricsCollector) recordUnattributedReadyPodsEvent(
+	va *llmdVariantAutoscalingV1alpha1.VariantAutoscaling,
+	readyCount int32,
+	vaEventTracker map[string]bool,
+) {
+	if c.recorder == nil {
+		return
+	}
+	key := utils.GetNamespacedKey(va.Namespace, va.Name)
+	if vaEventTracker != nil {
+		if _, ok := vaEventTracker[key]; ok { // one event per VA per cycle
+			return
+		}
+	}
+	c.recorder.Event(va, corev1.EventTypeWarning, constants.K8SEventUnattributedReadyPods,
+		fmt.Sprintf("%s has %d ready pod(s) but none attributed; "+
+			"verify the llm-d.ai/variant pod label on the scale target equals %q",
+			va.Name, readyCount, va.Name))
+	if vaEventTracker != nil {
+		vaEventTracker[key] = true
+	}
+}
+
+func (c *ReplicaMetricsCollector) recordMetricsUnavailableEvent(
+	variantAutoscalings map[string]*llmdVariantAutoscalingV1alpha1.VariantAutoscaling,
+	vaEventTracker map[string]bool,
+	reason string,
+) {
+	if c.recorder == nil {
+		return
+	}
+
+	for _, va := range variantAutoscalings {
+		key := utils.GetNamespacedKey(va.Namespace, va.Name)
+		if vaEventTracker != nil {
+			if _, ok := vaEventTracker[key]; ok { // ensures only one event is recorded per VA
+				continue
+			}
+		}
+		c.recorder.Event(va, corev1.EventTypeWarning, constants.K8SEventMetricsUnavailable, reason)
+		if vaEventTracker != nil {
+			vaEventTracker[key] = true
+		}
+	}
+}
+
+// CollectReplicaMetrics collects per-replica metrics for all replicas of a model and records
+// K8S events on failures. This wrapper ensures MetricsUnavailable events are emitted when
+// metrics collection fails or returns no data, using edge-triggered emission (only on
+// transitions from available → unavailable) to avoid flooding the event stream.
+//
 // The collected metrics serve both the saturation analyzer and the queueing model analyzer:
 //   - Saturation metrics: KV cache usage, queue length, token capacity, prefix cache hit rate
 //   - Queueing model metrics: scheduler dispatch rate (arrival rate), max batch size
-//
-// Prometheus-sourced metrics are fetched via registered query templates.
-// MaxBatchSize is parsed from the Deployment/LWS's container args (--max-num-seqs).
 //
 // Parameters:
 //   - ctx: Context for the operation
@@ -100,6 +165,167 @@ func NewReplicaMetricsCollector(metricsSource source.MetricsSource, k8sClient cl
 //   - []interfaces.ReplicaMetrics: Per-pod metrics for saturation and queueing model analysis
 //   - error: Any error that occurred during collection
 func (c *ReplicaMetricsCollector) CollectReplicaMetrics(
+	ctx context.Context,
+	modelID string,
+	namespace string,
+	scaleTargets map[string]scaletarget.ScaleTargetAccessor,
+	variantAutoscalings map[string]*llmdVariantAutoscalingV1alpha1.VariantAutoscaling,
+	vaEventTracker map[string]bool,
+	variantCosts map[string]float64,
+) ([]interfaces.ReplicaMetrics, error) {
+	replicaMetrics, err := c.collectReplicaMetrics(ctx, modelID, namespace, scaleTargets, variantAutoscalings, variantCosts)
+
+	// Determine if metrics are available in this cycle
+	metricsAvailable := err == nil && len(replicaMetrics) > 0
+
+	// Check previous state and emit events only on available → unavailable transitions
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	for key, va := range variantAutoscalings {
+		previouslyAvailable, seen := c.metricsAvailableState[key]
+
+		// Edge-triggered: only emit event on available → unavailable transition
+		// Don't emit on first observation (we don't know previous state - VA may have started at zero)
+		shouldEmitEvent := seen && previouslyAvailable && !metricsAvailable
+
+		if shouldEmitEvent {
+			if err != nil {
+				c.recordMetricsUnavailableEvent(map[string]*llmdVariantAutoscalingV1alpha1.VariantAutoscaling{key: va}, vaEventTracker, "Failed to collect metrics for model")
+			} else if len(replicaMetrics) == 0 {
+				c.recordMetricsUnavailableEvent(map[string]*llmdVariantAutoscalingV1alpha1.VariantAutoscaling{key: va}, vaEventTracker, "No saturation metrics available for model")
+			}
+		}
+
+		// Update state for next cycle
+		c.metricsAvailableState[key] = metricsAvailable
+	}
+
+	// Warn when a VA has Ready pods but none are attributed to it this cycle.
+	// Only runs when the model produced at least one attributed replica — model-wide
+	// emptiness is the availability path above; the scrape-lag gate keeps quiet there.
+	if err == nil && len(replicaMetrics) > 0 {
+		attributed := make(map[string]int, len(variantAutoscalings))
+		for i := range replicaMetrics {
+			attributed[replicaMetrics[i].VariantName]++
+		}
+		for _, va := range variantAutoscalings {
+			if attributed[va.Name] > 0 {
+				continue
+			}
+			stKey := utils.GetNamespacedKey(va.Namespace, va.GetScaleTargetName())
+			st, ok := scaleTargets[stKey]
+			if !ok || st == nil {
+				continue
+			}
+			if ready := st.GetStatusReadyReplicas(); ready > 0 {
+				ctrl.LoggerFrom(ctx).V(logging.DEBUG).Info("VA has ready pods but none attributed",
+					"va", va.Name, "namespace", va.Namespace, "readyReplicas", ready)
+				c.recordUnattributedReadyPodsEvent(va, ready, vaEventTracker)
+			}
+		}
+	}
+
+	if err != nil {
+		return nil, err
+	}
+	return replicaMetrics, nil
+}
+
+// buildInstanceKey returns (instanceKey, podName, vaName) for a series's labels.
+// vaName comes from the llm_d_ai_variant label when present (the legacy /
+// shadow-pod fast path). When absent and a pod label is present, falls back
+// to the locator's owner-walk for Deployment / LWS layouts. Returns
+// vaName="" when neither path resolves; the caller treats that as "skip".
+func (c *ReplicaMetricsCollector) buildInstanceKey(ctx context.Context, namespace string, labels map[string]string) (instanceKey, podName, vaName string) {
+	podName = labels["pod"]
+	if podName == "" {
+		podName = labels["pod_name"]
+	}
+
+	vaName = labels[constants.VariantLabelPrometheusKey]
+	if vaName == "" && podName != "" && c.locator != nil {
+		ms, err := c.locator.Locate(ctx, namespace, podName)
+		switch {
+		case err != nil:
+			ctrl.LoggerFrom(ctx).V(logging.DEBUG).Info("locator.Locate failed; treating pod as unmanaged",
+				"pod", podName, "namespace", namespace, "error", err)
+		case ms == nil:
+			// TODO(va-removal): delete this whole case when the VariantAutoscaling
+			// CRD is removed. It exists only for the CRD-based dual-mode path; the
+			// locator's ResolveScaleTarget method added for it can also go.
+			//
+			// No managed scaler in the pod's owner chain. This is the v0.7.0
+			// CRD dual-mode path: KServe creates its own HPA without
+			// llm-d.ai/managed=true, so the locator's managed-only lookup
+			// returns nil. Resolve the pod's scale target directly and look up
+			// the VA that targets it. Leaves vaName="" when no VA matches,
+			// preserving the unattributed-pod skip below.
+			if ref, ok, terr := c.locator.ResolveScaleTarget(ctx, namespace, podName); terr != nil {
+				ctrl.LoggerFrom(ctx).V(logging.DEBUG).Info("locator.ResolveScaleTarget failed; treating pod as unmanaged",
+					"pod", podName, "namespace", namespace, "error", terr)
+			} else if ok {
+				if va, lookupErr := indexers.FindVAForScaleTarget(ctx, c.k8sClient, ref, namespace); lookupErr == nil && va != nil {
+					vaName = va.Name
+				}
+			}
+		default:
+			switch {
+			case ms.HPA != nil:
+				// Prefer the VA CRD name over the HPA name: for CRD-based setups (e.g.
+				// KServe) the VA name and HPA name differ, and metrics are keyed by VA
+				// name. Fall back to HPA name for annotation-based setups where no VA
+				// CRD exists and the synthetic VA is keyed by the scaler name.
+				//
+				// TODO(va-removal): when the VariantAutoscaling CRD is removed, drop the
+				// FindVAForScaleTarget lookup and keep only `vaName = ms.HPA.Name` (the
+				// synthetic VA is always keyed by the scaler name).
+				if va, lookupErr := indexers.FindVAForScaleTarget(ctx, c.k8sClient, ms.HPA.Spec.ScaleTargetRef, namespace); lookupErr == nil && va != nil {
+					vaName = va.Name
+				} else {
+					vaName = ms.HPA.Name
+				}
+			case ms.ScaledObject != nil:
+				soRef := autoscalingv2.CrossVersionObjectReference{
+					APIVersion: ms.ScaledObject.Spec.ScaleTargetRef.APIVersion,
+					Kind:       ms.ScaledObject.Spec.ScaleTargetRef.Kind,
+					Name:       ms.ScaledObject.Spec.ScaleTargetRef.Name,
+				}
+				// TODO(va-removal): when the VariantAutoscaling CRD is removed, drop the
+				// FindVAForScaleTarget lookup and keep only `vaName = ms.ScaledObject.Name`
+				// (the synthetic VA is always keyed by the scaler name).
+				if va, lookupErr := indexers.FindVAForScaleTarget(ctx, c.k8sClient, soRef, namespace); lookupErr == nil && va != nil {
+					vaName = va.Name
+				} else {
+					vaName = ms.ScaledObject.Name
+				}
+			}
+		}
+	}
+
+	instance := labels["instance"]
+	port := ""
+	if instance != "" && podName != "" {
+		if idx := strings.LastIndex(instance, ":"); idx != -1 {
+			port = instance[idx+1:]
+		}
+	}
+
+	switch {
+	case podName != "" && port != "":
+		instanceKey = podName + ":" + port
+	case instance != "":
+		instanceKey = instance
+	case podName != "":
+		instanceKey = podName
+	default:
+		return "", "", ""
+	}
+	return instanceKey, podName, vaName
+}
+
+// collectReplicaMetrics is the internal implementation that collects per-replica metrics.
+func (c *ReplicaMetricsCollector) collectReplicaMetrics(
 	ctx context.Context,
 	modelID string,
 	namespace string,
@@ -227,47 +453,6 @@ func (c *ReplicaMetricsCollector) CollectReplicaMetrics(
 		trackTimestamp(data.avgITLTimestamp)
 	}
 
-	// Helper function to build consistent instance key from labels and extract VA name
-	// Prefers pod_name:port format for consistency with scheduler metrics
-	// Falls back to instance (IP:port) if pod_name is not available
-	// Also extracts the VariantAutoscaling name from the llm_d_ai_variant label
-	buildInstanceKey := func(labels map[string]string) (string, string, string) {
-		podName := labels["pod"]
-		if podName == "" {
-			podName = labels["pod_name"]
-		}
-
-		// Extract VA name from llm_d_ai_variant label (propagated by ServiceMonitor)
-		vaName := labels[constants.VariantLabelPrometheusKey]
-
-		// Try to extract port from instance label (IP:port format)
-		instance := labels["instance"]
-		port := ""
-		if instance != "" && podName != "" {
-			// Extract port from instance (format: IP:port)
-			if idx := strings.LastIndex(instance, ":"); idx != -1 {
-				port = instance[idx+1:]
-			}
-		}
-
-		// Build composite key: pod_name:port (consistent with scheduler metrics)
-		var instanceKey string
-		switch {
-		case podName != "" && port != "":
-			instanceKey = podName + ":" + port
-		case instance != "":
-			// Fallback to instance if we can't build pod_name:port
-			instanceKey = instance
-		case podName != "":
-			// Fallback to just pod name if no port available
-			instanceKey = podName
-		default:
-			return "", "", ""
-		}
-
-		return instanceKey, podName, vaName
-	}
-
 	// Extract per-pod metrics from results
 	podData := make(map[string]*podMetricData)
 
@@ -277,7 +462,7 @@ func (c *ReplicaMetricsCollector) CollectReplicaMetrics(
 			return nil, fmt.Errorf("KV cache query failed: %w", result.Error)
 		}
 		for _, value := range result.Values {
-			instanceKey, podName, vaName := buildInstanceKey(value.Labels)
+			instanceKey, podName, vaName := c.buildInstanceKey(ctx, namespace, value.Labels)
 			if instanceKey == "" {
 				continue
 			}
@@ -306,7 +491,7 @@ func (c *ReplicaMetricsCollector) CollectReplicaMetrics(
 			return nil, fmt.Errorf("queue length query failed: %w", result.Error)
 		}
 		for _, value := range result.Values {
-			instanceKey, podName, vaName := buildInstanceKey(value.Labels)
+			instanceKey, podName, vaName := c.buildInstanceKey(ctx, namespace, value.Labels)
 			if instanceKey == "" {
 				continue
 			}
@@ -339,7 +524,7 @@ func (c *ReplicaMetricsCollector) CollectReplicaMetrics(
 	if result := results[registration.QueryCacheConfigInfo]; result != nil {
 		if !result.HasError() {
 			for _, value := range result.Values {
-				instanceKey, podName, _ := buildInstanceKey(value.Labels)
+				instanceKey, podName, _ := c.buildInstanceKey(ctx, namespace, value.Labels)
 				if instanceKey == "" {
 					continue
 				}
@@ -380,7 +565,7 @@ func (c *ReplicaMetricsCollector) CollectReplicaMetrics(
 	if result := results[registration.QueryAvgOutputTokens]; result != nil {
 		if !result.HasError() {
 			for _, value := range result.Values {
-				instanceKey, podName, vaName := buildInstanceKey(value.Labels)
+				instanceKey, podName, vaName := c.buildInstanceKey(ctx, namespace, value.Labels)
 				if instanceKey == "" {
 					continue
 				}
@@ -404,7 +589,7 @@ func (c *ReplicaMetricsCollector) CollectReplicaMetrics(
 	if result := results[registration.QueryAvgInputTokens]; result != nil {
 		if !result.HasError() {
 			for _, value := range result.Values {
-				instanceKey, podName, vaName := buildInstanceKey(value.Labels)
+				instanceKey, podName, vaName := c.buildInstanceKey(ctx, namespace, value.Labels)
 				if instanceKey == "" {
 					continue
 				}
@@ -428,7 +613,7 @@ func (c *ReplicaMetricsCollector) CollectReplicaMetrics(
 	if result := results[registration.QueryPrefixCacheHitRate]; result != nil {
 		if !result.HasError() {
 			for _, value := range result.Values {
-				instanceKey, podName, vaName := buildInstanceKey(value.Labels)
+				instanceKey, podName, vaName := c.buildInstanceKey(ctx, namespace, value.Labels)
 				if instanceKey == "" {
 					continue
 				}
@@ -499,7 +684,7 @@ func (c *ReplicaMetricsCollector) CollectReplicaMetrics(
 	if result := results[registration.QueryAvgTTFT]; result != nil {
 		if !result.HasError() {
 			for _, value := range result.Values {
-				instanceKey, podName, vaName := buildInstanceKey(value.Labels)
+				instanceKey, podName, vaName := c.buildInstanceKey(ctx, namespace, value.Labels)
 				if instanceKey == "" {
 					continue
 				}
@@ -527,7 +712,7 @@ func (c *ReplicaMetricsCollector) CollectReplicaMetrics(
 	if result := results[registration.QueryAvgITL]; result != nil {
 		if !result.HasError() {
 			for _, value := range result.Values {
-				instanceKey, podName, vaName := buildInstanceKey(value.Labels)
+				instanceKey, podName, vaName := c.buildInstanceKey(ctx, namespace, value.Labels)
 				if instanceKey == "" {
 					continue
 				}
@@ -555,18 +740,15 @@ func (c *ReplicaMetricsCollector) CollectReplicaMetrics(
 	if result := results[registration.QueryGenerationTokenRate]; result != nil {
 		if !result.HasError() {
 			for _, value := range result.Values {
-				podName := value.Labels["pod"]
-				if podName == "" {
-					podName = value.Labels["pod_name"]
-				}
-				if podName == "" {
+				instanceKey, _, _ := c.buildInstanceKey(ctx, namespace, value.Labels)
+				if instanceKey == "" {
 					continue
 				}
-				if podData[podName] == nil {
-					podData[podName] = &podMetricData{}
+				if podData[instanceKey] == nil {
+					continue // skip pods the KV/queue queries didn't see (scrape skew)
 				}
 				if !math.IsNaN(value.Value) && !math.IsInf(value.Value, 0) && value.Value >= 0 {
-					podData[podName].generationTokenRate = value.Value
+					podData[instanceKey].generationTokenRate = value.Value
 				}
 			}
 		}
@@ -576,18 +758,15 @@ func (c *ReplicaMetricsCollector) CollectReplicaMetrics(
 	if result := results[registration.QueryKvUsageInstant]; result != nil {
 		if !result.HasError() {
 			for _, value := range result.Values {
-				podName := value.Labels["pod"]
-				if podName == "" {
-					podName = value.Labels["pod_name"]
-				}
-				if podName == "" {
+				instanceKey, _, _ := c.buildInstanceKey(ctx, namespace, value.Labels)
+				if instanceKey == "" {
 					continue
 				}
-				if podData[podName] == nil {
-					podData[podName] = &podMetricData{}
+				if podData[instanceKey] == nil {
+					continue // skip pods the KV/queue queries didn't see (scrape skew)
 				}
 				if !math.IsNaN(value.Value) && !math.IsInf(value.Value, 0) && value.Value >= 0 && value.Value <= 1 {
-					podData[podName].kvUsageInstant = value.Value
+					podData[instanceKey].kvUsageInstant = value.Value
 				}
 			}
 		}
@@ -597,18 +776,15 @@ func (c *ReplicaMetricsCollector) CollectReplicaMetrics(
 	if result := results[registration.QueryVLLMRequestRate]; result != nil {
 		if !result.HasError() {
 			for _, value := range result.Values {
-				podName := value.Labels["pod"]
-				if podName == "" {
-					podName = value.Labels["pod_name"]
-				}
-				if podName == "" {
+				instanceKey, _, _ := c.buildInstanceKey(ctx, namespace, value.Labels)
+				if instanceKey == "" {
 					continue
 				}
-				if podData[podName] == nil {
-					podData[podName] = &podMetricData{}
+				if podData[instanceKey] == nil {
+					continue // skip pods the KV/queue queries didn't see (scrape skew)
 				}
 				if !math.IsNaN(value.Value) && !math.IsInf(value.Value, 0) && value.Value >= 0 {
-					podData[podName].vllmRequestRate = value.Value
+					podData[instanceKey].vllmRequestRate = value.Value
 				}
 			}
 		}
@@ -674,6 +850,11 @@ func (c *ReplicaMetricsCollector) CollectReplicaMetrics(
 		}
 
 		if vaName == "" {
+			// Neither the llm-d.ai/variant label nor the pod locator attributed
+			// this pod to a managed scaler. Count it so the otherwise-silent skip
+			// is observable; the pod is unattributed, so the metric is keyed by
+			// namespace and reason only.
+			metrics.IncPodMappingMiss(namespace, constants.PodMappingMissUnresolved)
 			logger.Info("Skipping pod that doesn't match any scale target",
 				"pod", podName,
 				"instance", instanceKey,

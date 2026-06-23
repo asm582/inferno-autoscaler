@@ -92,7 +92,7 @@ export SCALE_TO_ZERO_ENABLED=false        # HPAScaleToZero feature gate
 export SCALER_BACKEND=prometheus-adapter  # or keda
 
 # Model configuration
-export MODEL_ID=unsloth/Meta-Llama-3.1-8B
+export MODEL_ID=e2ewva/dummy-model
 export ACCELERATOR_TYPE=nvidia.com/gpu
 export MAX_NUM_SEQS=5                     # Lower = easier to saturate
 
@@ -168,7 +168,7 @@ make test-e2e-smoke SCALER_BACKEND=keda
 make deploy-e2e-infra SCALER_BACKEND=keda && make test-e2e-full SCALER_BACKEND=keda
 ```
 
-To undeploy after using KEDA: `SCALER_BACKEND=keda make undeploy-wva-emulated-on-kind`.
+To tear down the Kind cluster after: `make destroy-kind-cluster`.
 
 ### Run smoke with full setup (Kind + KEDA) and save output
 
@@ -258,26 +258,20 @@ ginkgo -v --label-filter="smoke" ./test/e2e/
    - Tests PodScrapingSource discovery and scraping
    - Note: Direct scraping tests skipped on Kind (use in-cluster tests)
 
-4. **Saturation analyzer path and status propagation** (~2-6 min)
+4. **Saturation analyzer path and status propagation** (~2-4 min, simulator only)
    - Toggle saturation config `analyzerName` between `"saturation"` (V2) and unset (V1)
    - Verify controller processing path transitions for a dedicated test model
    - Verify stable status contract: `DesiredOptimizedAlloc` is populated and `MetricsAvailable=True`
-   - Run a bounded V1 threshold-crossing request job (no sustained load)
-   - Bounded deterministic assertions only (no benchmark/load criteria)
+   - Drive V1 threshold crossings via `--fake-metrics` (no HTTP load, no curl Job)
+   - Skipped when `USE_SIMULATOR=false` (fake-metrics flag is simulator-only)
 
-   **Threshold-crossing tunables** ([`createSaturationThresholdTriggerJob`](saturation_analyzer_path_test.go); shell in [`fixtures/saturation_threshold_trigger.sh`](fixtures/saturation_threshold_trigger.sh), embedded with `//go:embed`):
+   **Fake metrics calibration** (`v1FakeMetricsJSON` in [`saturation_analyzer_path_test.go`](saturation_analyzer_path_test.go)):
 
-   | Parameter | Current value | Role |
-   |-----------|---------------|------|
-   | `numRequests` | `6` | Exact, bounded completion requests for the V1 threshold scenario. |
-   | `max_tokens` | `400` | Keeps each request active long enough for metrics scrape/analyzer evaluation. |
-   | Service preflight retries | `24` | Retry budget before sending traffic (`/v1/models` probe loop). |
-   | Service preflight delay | `5s` | Delay between `/v1/models` probe attempts. |
-   | Per-request HTTP timeout | `curl --max-time 240` | Bounds request runtime while tolerating cold starts. |
-   | Job `backoffLimit` | `1` | One retry max to reduce hidden variability. |
-   | Target URL | `http://<model-service>:8000/v1/completions` | Direct model service path (not gateway) to keep trigger deterministic. |
-   | Endpoint readiness gate | service Endpoints ready `> 0` | Test waits for Kubernetes endpoints before creating the trigger job. |
-   | Job container image | `quay.io/curl/curl:8.11.1` | Non–Docker Hub image per e2e policy. |
+   | Field | Value | Role |
+   |-------|-------|------|
+   | `kv-cache-usage` | `0.3` | Above aggressive threshold (0.05) → scale-up; below conservative threshold (1.00) → no scale-up |
+   | `waiting-requests` | `2` | Above aggressive threshold (1) → scale-up; below conservative threshold (100) → no scale-up |
+   | `running-requests` | `1` | Baseline activity signal |
 
 **Run Command:**
 ```bash
@@ -370,7 +364,7 @@ See [config.go](config.go:1) for the complete list of configuration options.
 | `Environment` | `ENVIRONMENT` | `kind-emulator` | `kind-emulator` (emulated Kind), `openshift`, or `kubernetes` |
 | `UseSimulator` | `USE_SIMULATOR` | `true` | Use emulated GPUs (true) or real vLLM (false) |
 | `ScaleToZeroEnabled` | `SCALE_TO_ZERO_ENABLED` | `false` | Enable HPAScaleToZero feature gate |
-| `ModelID` | `MODEL_ID` | `unsloth/Meta-Llama-3.1-8B` | Model ID for deployments |
+| `ModelID` | `MODEL_ID` | `e2ewva/dummy-model` | Model ID for deployments (dummy name avoids vLLM Render sidecar in simulator v0.9.0+) |
 | `MaxNumSeqs` | `MAX_NUM_SEQS` | `5` | vLLM batch size (lower = easier to saturate) |
 | `EventuallyStandardSec` | `E2E_EVENTUALLY_STANDARD` | `120` | Default `Eventually` timeout (see bash block above for full set) |
 | `ScaleUpTimeout` | `SCALE_UP_TIMEOUT` | `600` | Longest scale / job waits |

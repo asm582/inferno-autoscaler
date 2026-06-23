@@ -14,7 +14,7 @@ CONTROLLER_NAMESPACE ?= workload-variant-autoscaler-system
 MONITORING_NAMESPACE ?= openshift-user-workload-monitoring
 LLMD_NAMESPACE       ?= llm-d-optimized-baseline
 GATEWAY_NAME         ?= # discovered automatically in e2es
-MODEL_ID             ?= unsloth/Meta-Llama-3.1-8B
+MODEL_ID             ?= e2ewva/dummy-model
 DEPLOYMENT           ?= # discovered automatically in e2es
 REQUEST_RATE         ?= 20
 NUM_PROMPTS          ?= 3000
@@ -32,11 +32,12 @@ E2E_MONITORING_NAMESPACE    ?= workload-variant-autoscaler-monitoring
 E2E_EMULATED_LLMD_NAMESPACE ?= llm-d-sim
 E2E_WVA_SECONDARY_OVERLAY_PATH ?= $(CURDIR)/test/e2e/testdata/secondary-controller
 # llm-d-benchmark CLI configuration
+# Ensure brew-installed tools (helm >=3.19) take precedence over Rancher Desktop
+export PATH := /opt/homebrew/bin:$(PATH)
 BENCHMARK_REPO_URL   ?= https://github.com/llm-d/llm-d-benchmark.git
 BENCHMARK_REPO_DIR   ?= $(CURDIR)/llm-d-benchmark
-BENCHMARK_REPO_REF   ?= v0.6.3
-# TODO: verify benchmark repo guide path for v0.7.0 (was guides/inference-scheduling-wva)
-BENCHMARK_SPEC       ?= guides/inference-scheduling-wva
+BENCHMARK_REPO_REF   ?= v0.7.0
+BENCHMARK_SPEC       ?= guides/workload-autoscaling
 BENCHMARK_NAMESPACE  ?= # set via BENCHMARK_NAMESPACE=<namespace>
 BENCHMARK_GATEWAY_URL ?= http://infra-llmdbench-inference-gateway-istio.$(BENCHMARK_NAMESPACE).svc.cluster.local:80
 BENCHMARK_WORKSPACE  ?= $(CURDIR)
@@ -133,28 +134,6 @@ destroy-kind-cluster:
 	export KIND=$(KIND) KUBECTL=$(KUBECTL) && \
         deploy/kind-emulator/teardown.sh
 
-# Deploys the WVA controller on a pre-existing Kind cluster or creates one if specified.
-# Set SCALER_BACKEND=keda if you want to install KEDA instead of Prometheus Adapter.
-.PHONY: deploy-wva-emulated-on-kind
-deploy-wva-emulated-on-kind: ## Deploy WVA + EPP on Kind (Prometheus Adapter as scaler backend)
-	@echo ">>> Deploying workload-variant-autoscaler (cluster args: $(KIND_ARGS), image: $(IMG))"
-	KIND=$(KIND) KUBECTL=$(KUBECTL) IMG=$(IMG) ENVIRONMENT=kind-emulator CREATE_CLUSTER=$(CREATE_CLUSTER) CLUSTER_GPU_TYPE=$(CLUSTER_GPU_TYPE) CLUSTER_NODES=$(CLUSTER_NODES) CLUSTER_GPUS=$(CLUSTER_GPUS) SCALER_BACKEND=$(SCALER_BACKEND) \
-		deploy/install.sh
-	@ENVIRONMENT=kind-emulator \
-		LLM_D_RELEASE=$(LLM_D_RELEASE) \
-		GAIE_VERSION=$(GAIE_VERSION) \
-		LLMD_NS=$${LLMD_NS:-$(E2E_EMULATED_LLMD_NAMESPACE)} \
-		WVA_PROJECT=$(CURDIR) \
-		ENABLE_SCALE_TO_ZERO=$(SCALE_TO_ZERO_ENABLED) \
-		./deploy/install-epp.sh
-
-## Undeploy WVA from the emulated environment on Kind.
-## Undeploy WVA from Kind (set SCALER_BACKEND=keda if you deployed with KEDA)
-.PHONY: undeploy-wva-emulated-on-kind
-undeploy-wva-emulated-on-kind:
-	@echo ">>> Undeploying workload-variant-autoscaler from Kind"
-	KIND=$(KIND) KUBECTL=$(KUBECTL) ENVIRONMENT=kind-emulator DELETE_NAMESPACES=$(DELETE_NAMESPACES) DELETE_CLUSTER=$(DELETE_CLUSTER) SCALER_BACKEND=$(SCALER_BACKEND) \
-		deploy/install.sh --undeploy
 
 ## Deploy WVA to OpenShift cluster with specified image.
 .PHONY: deploy-wva-on-openshift
@@ -307,6 +286,35 @@ test-e2e-full: ## Run full e2e test suite
 .PHONY: test-e2e-smoke-with-setup
 test-e2e-smoke-with-setup: deploy-e2e-infra test-e2e-smoke
 
+# Runs only the multi-controller (dual namespace-scoped) e2e tests.
+.PHONY: test-e2e-multi-controller
+test-e2e-multi-controller: ## Run multi-controller e2e tests
+	@echo "Running multi-controller e2e tests..."
+	$(eval FOCUS_ARGS := $(if $(FOCUS),-ginkgo.focus="$(FOCUS)",))
+	$(eval SKIP_ARGS := $(if $(SKIP),-ginkgo.skip="$(SKIP)",))
+	KUBECONFIG=$(KUBECONFIG) \
+	ENVIRONMENT=$(ENVIRONMENT) \
+	WVA_NAMESPACE=$(CONTROLLER_NAMESPACE) \
+	LLMD_NAMESPACE=$(E2E_EMULATED_LLMD_NAMESPACE) \
+	MONITORING_NAMESPACE=$(E2E_MONITORING_NAMESPACE) \
+	WVA_E2E_SECONDARY_OVERLAY_PATH=$${WVA_E2E_SECONDARY_OVERLAY_PATH:-$(E2E_WVA_SECONDARY_OVERLAY_PATH)} \
+	USE_SIMULATOR=$(USE_SIMULATOR) \
+	SCALE_TO_ZERO_ENABLED=$(SCALE_TO_ZERO_ENABLED) \
+	SCALER_BACKEND=$(SCALER_BACKEND) \
+	MODEL_ID=$(MODEL_ID) \
+	go test ./test/e2e/ -timeout 35m -v -ginkgo.v \
+		-ginkgo.label-filter="multi-controller" $(FOCUS_ARGS) $(SKIP_ARGS); \
+	TEST_EXIT_CODE=$$?; \
+	echo ""; \
+	echo "=========================================="; \
+	echo "Test execution completed. Exit code: $$TEST_EXIT_CODE"; \
+	echo "=========================================="; \
+	exit $$TEST_EXIT_CODE
+
+# Convenience target that deploys infra + runs multi-controller tests.
+.PHONY: test-e2e-multi-controller-with-setup
+test-e2e-multi-controller-with-setup: deploy-e2e-infra test-e2e-multi-controller
+
 # Convenience target that deploys infra + runs full test suite.
 # Set DELETE_CLUSTER=true to delete Kind cluster after tests (default: keep cluster for debugging).
 # LWS is installed because the full suite includes LeaderWorkerSet scale-from-zero tests.
@@ -320,8 +328,7 @@ test-e2e-full-with-setup:
 
 # llmdbenchmark binary from the benchmark repo venv
 BENCHMARK_VENV       = $(BENCHMARK_REPO_DIR)/.venv
-LLMDBENCHMARK        = $(BENCHMARK_VENV)/bin/llmdbenchmark
-BENCHMARK_PYTHON     = $(BENCHMARK_VENV)/bin/python3
+LLMDBENCHMARK        = $(shell command -v llmdbenchmark 2>/dev/null || echo $(BENCHMARK_VENV)/bin/llmdbenchmark)
 
 # Common llmdbenchmark flags (spec + workspace + base dir for config resolution)
 BENCHMARK_CLI_FLAGS = --spec $(BENCHMARK_SPEC) --workspace $(BENCHMARK_WORKSPACE) --base-dir $(BENCHMARK_REPO_DIR)
@@ -336,6 +343,9 @@ benchmark-install: ## Clone llm-d-benchmark at BENCHMARK_REPO_REF (default v0.6.
 		cd $(BENCHMARK_REPO_DIR) && git fetch --tags && git checkout $(BENCHMARK_REPO_REF); \
 	fi
 	@cd $(BENCHMARK_REPO_DIR) && ./install.sh $(if $(filter true,$(BENCHMARK_UV)),--uv,--no-uv)
+	@echo "Upgrading helm-diff to v3.15.10 for Helm 4 compatibility..."
+	@helm plugin uninstall diff 2>/dev/null || true
+	@helm plugin install https://github.com/databus23/helm-diff --version v3.15.10 --verify=false 2>&1
 
 .PHONY: benchmark-standup
 benchmark-standup: ## Stand up the benchmark environment (set BENCHMARK_NAMESPACE=<namespace>, MODEL_ID=<model>)
@@ -345,14 +355,14 @@ benchmark-standup: ## Stand up the benchmark environment (set BENCHMARK_NAMESPAC
 	fi
 	@echo "Injecting PYTORCH_ALLOC_CONF into scenario YAML..."
 	@sed -i.bak 's/extraEnvVars: \[\]/extraEnvVars:\n        - name: PYTORCH_ALLOC_CONF\n          value: "expandable_segments:True"/' \
-		$(BENCHMARK_REPO_DIR)/config/scenarios/guides/inference-scheduling-wva.yaml
+		$(BENCHMARK_REPO_DIR)/config/scenarios/guides/workload-autoscaling.yaml
 	$(LLMDBENCHMARK) $(BENCHMARK_CLI_FLAGS) standup \
 		-p $(BENCHMARK_NAMESPACE) \
 		$(if $(BENCHMARK_MODEL_ID),-m $(BENCHMARK_MODEL_ID),) \
 		$(if $(filter true,$(BENCHMARK_MONITORING)),--monitoring,); \
 	rc=$$?; \
-	mv $(BENCHMARK_REPO_DIR)/config/scenarios/guides/inference-scheduling-wva.yaml.bak \
-	   $(BENCHMARK_REPO_DIR)/config/scenarios/guides/inference-scheduling-wva.yaml; \
+	mv $(BENCHMARK_REPO_DIR)/config/scenarios/guides/workload-autoscaling.yaml.bak \
+	   $(BENCHMARK_REPO_DIR)/config/scenarios/guides/workload-autoscaling.yaml; \
 	exit $$rc
 
 .PHONY: benchmark-run
@@ -361,9 +371,9 @@ benchmark-run: ## Run a single benchmark workload (set BENCHMARK_NAMESPACE=<name
 		echo "ERROR: BENCHMARK_NAMESPACE is required. Usage: make benchmark-run BENCHMARK_NAMESPACE=<namespace>"; \
 		exit 1; \
 	fi
-	@if [ -f "$(BENCHMARK_SCENARIOS_DIR)/$(BENCHMARK_WORKLOAD)" ]; then \
-		cp "$(BENCHMARK_SCENARIOS_DIR)/$(BENCHMARK_WORKLOAD)" \
-		   "$(BENCHMARK_REPO_DIR)/workload/profiles/$(BENCHMARK_HARNESS)/$(BENCHMARK_WORKLOAD)"; \
+	@if [ -f "$(BENCHMARK_SCENARIOS_DIR)/$(BENCHMARK_WORKLOAD).in" ]; then \
+		cp "$(BENCHMARK_SCENARIOS_DIR)/$(BENCHMARK_WORKLOAD).in" \
+		   "$(BENCHMARK_REPO_DIR)/workload/profiles/$(BENCHMARK_HARNESS)/$(BENCHMARK_WORKLOAD).in"; \
 	fi
 	$(LLMDBENCHMARK) $(BENCHMARK_CLI_FLAGS) run \
 		-p $(BENCHMARK_NAMESPACE) \
@@ -382,9 +392,9 @@ benchmark-run-bursty: ## Run bursty traffic benchmark using inference-perf multi
 		echo "ERROR: BENCHMARK_NAMESPACE is required. Usage: make benchmark-run-bursty BENCHMARK_NAMESPACE=<namespace>"; \
 		exit 1; \
 	fi
-	@if [ -f "$(BENCHMARK_SCENARIOS_DIR)/$(BURSTY_WORKLOAD)" ]; then \
-		cp "$(BENCHMARK_SCENARIOS_DIR)/$(BURSTY_WORKLOAD)" \
-		   "$(BENCHMARK_REPO_DIR)/workload/profiles/inference-perf/$(BURSTY_WORKLOAD)"; \
+	@if [ -f "$(BENCHMARK_SCENARIOS_DIR)/$(BURSTY_WORKLOAD).in" ]; then \
+		cp "$(BENCHMARK_SCENARIOS_DIR)/$(BURSTY_WORKLOAD).in" \
+		   "$(BENCHMARK_REPO_DIR)/workload/profiles/inference-perf/$(BURSTY_WORKLOAD).in"; \
 	fi
 	@echo "Patching harness memory to $(BENCHMARK_HARNESS_MEMORY)..."
 	@sed -i.bak 's/memory: 32Gi/memory: $(BENCHMARK_HARNESS_MEMORY)/' \
@@ -407,8 +417,8 @@ benchmark-run-all: ## Run all scenarios: teardown → standup → run per scenar
 		echo "ERROR: BENCHMARK_NAMESPACE is required. Usage: make benchmark-run-all BENCHMARK_NAMESPACE=<namespace>"; \
 		exit 1; \
 	fi
-	@for scenario in $(BENCHMARK_SCENARIOS_DIR)/*.yaml; do \
-		scenario_name=$$(basename "$$scenario"); \
+	@for scenario in $(BENCHMARK_SCENARIOS_DIR)/*.yaml.in; do \
+		scenario_name=$$(basename "$$scenario" .in); \
 		echo ""; \
 		echo "=========================================="; \
 		echo "[1/3] Tearing down before: $$scenario_name"; \
@@ -724,3 +734,6 @@ mv $(1) $(1)-$(3) ;\
 } ;\
 ln -sf $(1)-$(3) $(1)
 endef
+
+
+include config/samples/hpa/co-ordinator/poc.mk
