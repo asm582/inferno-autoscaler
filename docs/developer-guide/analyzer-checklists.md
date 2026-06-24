@@ -61,4 +61,4 @@ All benchmark results must be added to [`docs/benchmark.md`](../benchmark.md) in
 | Cost (avg replicas × GPU/hr) | ... | ... |
 ```
 
-Include the analyzer's configuration parameters (thresholds, tuning knobs) alongside the results so that others can reproduce the run.
+Include the analyzer's configuration parameters (thresholds, tuning knobs) alongside the results so that others can reproduce the run with clear instructions in developer docs.
