@@ -81,7 +81,7 @@ scenario:
       # WVA HPA is installed here then replaced by hack/benchmark-swap-hpa.py.
       hpa:
         enabled: true
-        minReplicas: 1
+        # minReplicas: 1  # default
         maxReplicas: 10
         targetAvgValue: 1
         behavior:

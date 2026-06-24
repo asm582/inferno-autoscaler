@@ -8,7 +8,7 @@ This guide shows how to replicate the Saturation V1 autoscaling logic from the W
 |---|---|
 | Single Deployment per model, no variant cost-optimization needed | **This guide** |
 | Multiple GPU variants per model, cost-aware placement | Use WVA Saturation V1 |
-| You need scale-to-zero | Use WVA (native HPA cannot scale to zero without KEDA) |
+| You need scale-to-zero | Native HPA supports scale to zero (Kubernetes 1.32+); use WVA or KEDA on older clusters |
 
 ---
 
@@ -102,13 +102,16 @@ kubectl get deployment prometheus-adapter -n monitoring
 
 If not installed, use Helm:
 
+> **Note:** prometheus-adapter is [deprecated](https://github.com/kubernetes-sigs/prometheus-adapter/issues/701).
+> Consider a maintained alternative (e.g. the [custom-metrics-stackdriver-adapter](https://github.com/GoogleCloudPlatform/k8s-stackdriver) or a vendor-provided adapter) for production use.
+
 ```bash
 helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
 helm repo update
 helm install prometheus-adapter prometheus-community/prometheus-adapter \
   --namespace monitoring \
-  --set prometheus.url=http://prometheus-operated.monitoring.svc \
-  --set prometheus.port=9090
+  --set prometheus.url=http://prometheus-operated.monitoring.svc
+  # --set prometheus.port=9090  # default; omit unless Prometheus uses a non-standard port
 ```
 
 ---
@@ -192,7 +195,7 @@ spec:
     kind: Deployment
     name: <vllm-deployment-name>              # replace
 
-  minReplicas: 1
+  # minReplicas: 1                            # Kubernetes default; omit to inherit
   maxReplicas: 10                             # replace with your upper bound
 
   metrics:
@@ -226,7 +229,7 @@ spec:
   behavior:
     scaleUp:
       # React immediately — V1 has no scale-up cooldown window
-      stabilizationWindowSeconds: 0
+      # stabilizationWindowSeconds: 0  # Kubernetes default for scaleUp; omit to inherit
       policies:
         # Add one pod at a time. periodSeconds must be >= pod startup time so that
         # the HPA waits for the new replica to be ready before firing again — this
@@ -235,11 +238,11 @@ spec:
         - type: Pods
           value: 1
           periodSeconds: 180
-      selectPolicy: Max
+      # selectPolicy: Max  # Kubernetes default for scaleUp; omit to inherit
 
     scaleDown:
       # Hold 5 minutes before scaling down — approximates V1's N/(N-1) safety simulation
-      stabilizationWindowSeconds: 300
+      # stabilizationWindowSeconds: 300  # Kubernetes default for scaleDown; omit to inherit
       policies:
         # Remove one pod at a time, matching V1's single-step scale-down rule
         - type: Pods

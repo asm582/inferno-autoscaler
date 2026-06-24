@@ -482,12 +482,12 @@ _HPA_RUN_HARNESS  = $(if $(filter command line,$(origin BENCHMARK_HARNESS)),$(BE
 _HPA_RUN_WORKLOAD = $(if $(filter command line,$(origin BENCHMARK_WORKLOAD)),$(BENCHMARK_WORKLOAD),$(HPA_BENCHMARK_WORKLOAD))
 HPA_KV_CACHE_TARGET      ?= 700m
 HPA_QUEUE_TARGET         ?= 2
-HPA_MIN_REPLICAS         ?= 1
+HPA_MIN_REPLICAS         ?= 1    # k8s default
 HPA_MAX_REPLICAS         ?= 10
 # How often the HPA is allowed to add/remove one pod (seconds).
 # Larger values produce smoother scaling; smaller values react faster.
 HPA_SCALE_UP_PERIOD_SEC   ?= 180
-HPA_SCALE_DOWN_PERIOD_SEC ?= 300
+HPA_SCALE_DOWN_PERIOD_SEC ?= 300  # k8s default for scaleDown.stabilizationWindowSeconds
 
 .PHONY: benchmark-standup-hpa
 benchmark-standup-hpa: ## Stand up Saturation V1 HPA benchmark scenario (set BENCHMARK_NAMESPACE=<namespace>)

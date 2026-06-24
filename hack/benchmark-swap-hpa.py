@@ -3,6 +3,10 @@
 
 Usage:
     benchmark-swap-hpa.py <namespace> <kv-target> <queue-target> <min-replicas> <max-replicas> <scale-up-period-sec> <scale-down-period-sec>
+
+Note: this script shells out to kubectl rather than using the Python kubernetes client
+(kubernetes-client/python) to keep the dependency footprint small — the benchmark
+environment already requires kubectl, so no extra install is needed.
 """
 
 import argparse
