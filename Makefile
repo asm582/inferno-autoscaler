@@ -37,8 +37,9 @@ E2E_WVA_SECONDARY_OVERLAY_PATH ?= $(CURDIR)/test/e2e/testdata/secondary-controll
 export PATH := /opt/homebrew/bin:$(PATH)
 BENCHMARK_REPO_URL   ?= https://github.com/llm-d/llm-d-benchmark.git
 BENCHMARK_REPO_DIR   ?= $(CURDIR)/llm-d-benchmark
-BENCHMARK_REPO_REF   ?= v0.7.0
-BENCHMARK_SPEC       ?= guides/workload-autoscaling
+BENCHMARK_DIRECT_KEDA ?= false
+BENCHMARK_REPO_REF   ?= $(if $(filter true,$(BENCHMARK_DIRECT_KEDA)),main,v0.7.0)
+BENCHMARK_SPEC       ?= $(if $(filter true,$(BENCHMARK_DIRECT_KEDA)),guides/epp-keda-saturation,guides/workload-autoscaling)
 BENCHMARK_NAMESPACE  ?= # set via BENCHMARK_NAMESPACE=<namespace>
 BENCHMARK_GATEWAY_URL ?= http://infra-llmdbench-inference-gateway-istio.$(BENCHMARK_NAMESPACE).svc.cluster.local:80
 BENCHMARK_WORKSPACE  ?= $(CURDIR)
@@ -49,6 +50,11 @@ BENCHMARK_MONITORING ?= true
 BENCHMARK_UV         ?= false
 BENCHMARK_SCENARIOS_DIR ?= $(CURDIR)/test/benchmark/scenarios
 BENCHMARK_MODEL_ID   ?= $(MODEL_ID)
+BENCHMARK_DECODE_REPLICAS ?= 1
+BENCHMARK_KEDA_MIN_REPLICAS ?= 1
+BENCHMARK_KEDA_MAX_REPLICAS ?= 10
+BENCHMARK_KEDA_SCALE_UP_PERIOD ?= 0
+BENCHMARK_KEDA_SCALE_DOWN_PERIOD ?= 300
 
 # Flags for deploy/install.sh (e2e / CI-style cluster infra; no chart VA/HPA).
 CREATE_CLUSTER    ?= false
@@ -406,11 +412,25 @@ benchmark-install: ## Clone llm-d-benchmark at BENCHMARK_REPO_REF (default v0.7.
 	@helm plugin install https://github.com/databus23/helm-diff --version v3.15.10 --verify=false 2>&1
 
 .PHONY: benchmark-standup
-benchmark-standup: ## Stand up the benchmark environment (set BENCHMARK_NAMESPACE=<namespace>, MODEL_ID=<model>)
+benchmark-standup: ## Stand up the benchmark environment (set BENCHMARK_NAMESPACE=<namespace>, MODEL_ID=<model>; BENCHMARK_DIRECT_KEDA=true for controller-free EPP+KEDA autoscaling instead of WVA)
 	@if [ -z "$(BENCHMARK_NAMESPACE)" ]; then \
 		echo "ERROR: BENCHMARK_NAMESPACE is required. Usage: make benchmark-standup BENCHMARK_NAMESPACE=<namespace>"; \
 		exit 1; \
 	fi
+	@if [ "$(BENCHMARK_DIRECT_KEDA)" = "true" ]; then \
+		echo "Direct-KEDA mode: this feature isn't in a released llm-d-benchmark tag yet — upgrading the llm-d-benchmark checkout to '$(BENCHMARK_REPO_REF)' (unreleased)..."; \
+		if ! kubectl get crd scaledobjects.keda.sh >/dev/null 2>&1; then \
+			echo "ERROR: KEDA is not installed on this cluster (scaledobjects.keda.sh CRD not found)."; \
+			echo "Install KEDA first (e.g. 'make deploy-e2e-infra SCALER_BACKEND=keda ENVIRONMENT=$(ENVIRONMENT)', or your platform's KEDA operator) and re-run."; \
+			exit 1; \
+		fi; \
+		echo "KEDA ScaledObject CRD found — proceeding with direct-KEDA standup (no WVA controller)."; \
+	fi
+	@if [ -d "$(BENCHMARK_REPO_DIR)" ]; then \
+		cd $(BENCHMARK_REPO_DIR) && git checkout -- config/scenarios config/specification config/templates 2>/dev/null || true; \
+	fi
+	@$(MAKE) benchmark-install BENCHMARK_REPO_REF=$(BENCHMARK_REPO_REF)
+	@cd $(BENCHMARK_REPO_DIR) && git reset --hard origin/$(BENCHMARK_REPO_REF) 2>/dev/null || true
 	@if [ -f "$(CURDIR)/hack/benchmark/scenarios/$(BENCHMARK_SPEC).yaml" ]; then \
 		echo "Copying local scenario: hack/benchmark/scenarios/$(BENCHMARK_SPEC).yaml -> $(BENCHMARK_REPO_DIR)/config/scenarios/$(BENCHMARK_SPEC).yaml"; \
 		mkdir -p "$(BENCHMARK_REPO_DIR)/config/scenarios/$$(dirname $(BENCHMARK_SPEC))"; \
@@ -433,9 +453,23 @@ benchmark-standup: ## Stand up the benchmark environment (set BENCHMARK_NAMESPAC
 		kubectl label --overwrite clusterrole prometheus-adapter-resource-reader \
 			app.kubernetes.io/managed-by=Helm; \
 	fi
-	@echo "Injecting PYTORCH_ALLOC_CONF into scenario YAML ($(BENCHMARK_SPEC).yaml)..."
+	@echo "Injecting PYTORCH_ALLOC_CONF, decode replicas, and KEDA config into scenario YAML ($(BENCHMARK_SPEC).yaml)..."
 	@sed -i.bak 's/extraEnvVars: \[\]/extraEnvVars:\n        - name: PYTORCH_ALLOC_CONF\n          value: "expandable_segments:True"/' \
 		$(BENCHMARK_REPO_DIR)/config/scenarios/$(BENCHMARK_SPEC).yaml
+	@sed -i.bak 's/replicas: 2$$/replicas: $(BENCHMARK_DECODE_REPLICAS)/' \
+		$(BENCHMARK_REPO_DIR)/config/scenarios/$(BENCHMARK_SPEC).yaml
+	@awk ' \
+		/scaledObject:/ { in_keda=1 } \
+		in_keda && /^    [a-z]/ && !/scaledObject:/ { in_keda=0 } \
+		in_keda && /minReplicas: / { gsub(/minReplicas: [0-9]+/, "minReplicas: $(BENCHMARK_KEDA_MIN_REPLICAS)"); } \
+		in_keda && /maxReplicas: / { gsub(/maxReplicas: [0-9]+/, "maxReplicas: $(BENCHMARK_KEDA_MAX_REPLICAS)"); } \
+		in_keda && /scaleUp:/ { scale_section="up"; } \
+		in_keda && /scaleDown:/ { scale_section="down"; } \
+		in_keda && scale_section=="up" && /periodSeconds: 180/ { gsub(/periodSeconds: 180/, "periodSeconds: $(BENCHMARK_KEDA_SCALE_UP_PERIOD)"); scale_section=""; } \
+		in_keda && scale_section=="down" && /periodSeconds: 300/ { gsub(/periodSeconds: 300/, "periodSeconds: $(BENCHMARK_KEDA_SCALE_DOWN_PERIOD)"); scale_section=""; } \
+		{ print } \
+	' $(BENCHMARK_REPO_DIR)/config/scenarios/$(BENCHMARK_SPEC).yaml > $(BENCHMARK_REPO_DIR)/config/scenarios/$(BENCHMARK_SPEC).yaml.tmp && \
+	mv $(BENCHMARK_REPO_DIR)/config/scenarios/$(BENCHMARK_SPEC).yaml.tmp $(BENCHMARK_REPO_DIR)/config/scenarios/$(BENCHMARK_SPEC).yaml
 	$(LLMDBENCHMARK) $(BENCHMARK_CLI_FLAGS) standup \
 		-p $(BENCHMARK_NAMESPACE) \
 		$(if $(BENCHMARK_MODEL_ID),-m $(BENCHMARK_MODEL_ID),) \
