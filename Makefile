@@ -428,6 +428,10 @@ benchmark-standup: ## Stand up the benchmark environment (set BENCHMARK_NAMESPAC
 	   $(BENCHMARK_REPO_DIR)/config/scenarios/$(BENCHMARK_SPEC).yaml; \
 	exit $$rc
 
+# Note: For KEDA autoscaling to work, the benchmark namespace must have the label:
+#   oc label namespace <namespace> openshift.io/user-monitoring=true
+# This enables Prometheus to scrape metrics from ServiceMonitors in that namespace.
+
 .PHONY: benchmark-run
 benchmark-run: ## Run a single benchmark workload (set BENCHMARK_NAMESPACE=<namespace>, MODEL_ID=<model>, BENCHMARK_HARNESS=guidellm|inference-perf)
 	@if [ -z "$(BENCHMARK_NAMESPACE)" ]; then \
