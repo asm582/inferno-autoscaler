@@ -482,7 +482,8 @@ benchmark-run: ## Run a single benchmark workload (set BENCHMARK_NAMESPACE=<name
 		-l $(BENCHMARK_HARNESS) \
 		-w $(BENCHMARK_WORKLOAD) \
 		$(if $(BENCHMARK_MODEL_ID),-m $(BENCHMARK_MODEL_ID),) \
-		$(if $(filter true,$(BENCHMARK_MONITORING)),--monitoring,)
+		$(if $(filter true,$(BENCHMARK_MONITORING)),--monitoring,) \
+		--wait-timeout $(BENCHMARK_WAIT_TIMEOUT)
 	@echo ""
 	@echo "========================================="
 	@echo "  Generating benchmark report..."
