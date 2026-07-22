@@ -425,12 +425,12 @@ benchmark-standup: ## Stand up the benchmark environment (set BENCHMARK_NAMESPAC
 		$(if $(filter true,$(BENCHMARK_MONITORING)),--monitoring,); \
 	rc=$$?; \
 	mv $(BENCHMARK_REPO_DIR)/config/scenarios/$(BENCHMARK_SPEC).yaml.bak \
-	   $(BENCHMARK_REPO_DIR)/config/scenarios/$(BENCHMARK_SPEC).yaml
-	@if [ $$rc -eq 0 ] && [ "$(BENCHMARK_MONITORING)" = "true" ]; then \
+	   $(BENCHMARK_REPO_DIR)/config/scenarios/$(BENCHMARK_SPEC).yaml; \
+	if [ $$rc -eq 0 ] && [ "$(BENCHMARK_MONITORING)" = "true" ]; then \
 		echo "Enabling user-workload monitoring for namespace $(BENCHMARK_NAMESPACE)..."; \
 		oc label namespace $(BENCHMARK_NAMESPACE) openshift.io/user-workload-monitoring=enabled --overwrite 2>/dev/null && \
 		echo "✅ Monitoring label applied. Prometheus will begin scraping ServiceMonitors in this namespace."; \
-	fi
+	fi; \
 	exit $$rc
 
 .PHONY: benchmark-run
