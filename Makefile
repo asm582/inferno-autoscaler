@@ -477,7 +477,7 @@ benchmark-run: ## Run a single benchmark workload (set BENCHMARK_NAMESPACE=<name
 	$(LLMDBENCHMARK) $(BENCHMARK_CLI_FLAGS) run \
 		-p $(BENCHMARK_NAMESPACE) \
 		-l $(BENCHMARK_HARNESS) \
-		-w $(BENCHMARK_WORKLOAD) \
+		-w $(BENCHMARK_WORKLOAD).yaml \
 		$(if $(BENCHMARK_MODEL_ID),-m $(BENCHMARK_MODEL_ID),) \
 		$(if $(filter true,$(BENCHMARK_MONITORING)),--monitoring,) \
 		--wait-timeout $(BENCHMARK_WAIT_TIMEOUT)
