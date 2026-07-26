@@ -1,0 +1,71 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: inferno-webhook
+  namespace: inferno-system
+  labels:
+    app: inferno-webhook
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: inferno-webhook
+  labels:
+    app: inferno-webhook
+rules:
+# List and get pods to discover them
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["list", "get", "watch"]
+
+# Patch pod annotations (for deletion cost)
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["patch", "update"]
+
+# Read configmaps for configuration
+- apiGroups: [""]
+  resources: ["configmaps"]
+  verbs: ["get", "list", "watch"]
+
+# Read namespaces
+- apiGroups: [""]
+  resources: ["namespaces"]
+  verbs: ["list", "get", "watch"]
+
+# OpenShift-specific: Read SecurityContextConstraints
+- apiGroups: ["security.openshift.io"]
+  resources: ["securitycontextconstraints"]
+  verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: inferno-webhook
+  labels:
+    app: inferno-webhook
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: inferno-webhook
+subjects:
+- kind: ServiceAccount
+  name: inferno-webhook
+  namespace: inferno-system
+---
+# OpenShift-specific: Bind to nonroot SCC
+# This allows webhook to run under restricted-v2 SCC with non-root UID
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: inferno-webhook-scc-nonroot
+  labels:
+    app: inferno-webhook
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:openshift:scc:nonroot
+subjects:
+- kind: ServiceAccount
+  name: inferno-webhook
+  namespace: inferno-system
