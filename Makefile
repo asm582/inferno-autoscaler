@@ -97,6 +97,24 @@ all: build
 # More info on the awk command:
 # http://linuxcommand.org/lc3_adv_awk.php
 
+##@ Webhook
+
+.PHONY: test-webhook
+test-webhook: ## Run webhook unit tests
+	go test -v ./internal/webhook/...
+
+.PHONY: test-webhook-integration
+test-webhook-integration: ## Run webhook integration tests (requires envtest)
+	go test -v -tags=integration ./test/integration/...
+
+.PHONY: test-webhook-e2e
+test-webhook-e2e: ## Run webhook E2E tests (requires Kind cluster)
+	go test -v -tags=e2e ./test/e2e/...
+
+.PHONY: build-webhook
+build-webhook: ## Build webhook binary
+	go build -o bin/webhook ./cmd/webhook
+
 .PHONY: help
 help: ## Display this help.
 	@awk 'BEGIN {FS = ":.*##"; printf "\nUsage:\n  make \033[36m<target>\033[0m\n"} /^[a-zA-Z_0-9-]+:.*?##/ { printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2 } /^##@/ { printf "\n\033[1m%s\033[0m\n", substr($$0, 5) } ' $(MAKEFILE_LIST)
@@ -434,7 +452,7 @@ benchmark-standup: ## Stand up the benchmark environment (set BENCHMARK_NAMESPAC
 	exit $$rc
 
 .PHONY: benchmark-run
-benchmark-run: ## Run a single benchmark workload (set BENCHMARK_NAMESPACE=<namespace>, MODEL_ID=<model>, BENCHMARK_HARNESS=guidellm|inference-perf)
+benchmark-run: ## Run a single benchmark workload (set BENCHMARK_NAMESPACE=<namespace>, MODEL_ID=<model>, BENCHMARK_HARNESS=guidellm|inference-perf, BENCHMARK_LOG_LEVEL=DEBUG|INFO|WARNING|ERROR|CRITICAL)
 	@if [ -z "$(BENCHMARK_NAMESPACE)" ]; then \
 		echo "ERROR: BENCHMARK_NAMESPACE is required. Usage: make benchmark-run BENCHMARK_NAMESPACE=<namespace>"; \
 		exit 1; \
@@ -473,6 +491,11 @@ benchmark-run: ## Run a single benchmark workload (set BENCHMARK_NAMESPACE=<name
 				"$(BENCHMARK_REPO_DIR)/workload/profiles/$(BENCHMARK_HARNESS)/$(BENCHMARK_WORKLOAD).yaml"; \
 			rm -f "$(BENCHMARK_REPO_DIR)/workload/profiles/$(BENCHMARK_HARNESS)/$(BENCHMARK_WORKLOAD).yaml.bak"; \
 		fi; \
+	fi
+	@if [ -n "$(BENCHMARK_LOG_LEVEL)" ] && [ "$(BENCHMARK_LOG_LEVEL)" != "INFO" ]; then \
+		echo "Injecting log_level: $(BENCHMARK_LOG_LEVEL) into workload profile..."; \
+		(echo "log_level: $(BENCHMARK_LOG_LEVEL)"; cat $(BENCHMARK_REPO_DIR)/workload/profiles/$(BENCHMARK_HARNESS)/$(BENCHMARK_WORKLOAD).yaml) > $(BENCHMARK_REPO_DIR)/workload/profiles/$(BENCHMARK_HARNESS)/$(BENCHMARK_WORKLOAD).yaml.tmp; \
+		mv $(BENCHMARK_REPO_DIR)/workload/profiles/$(BENCHMARK_HARNESS)/$(BENCHMARK_WORKLOAD).yaml.tmp $(BENCHMARK_REPO_DIR)/workload/profiles/$(BENCHMARK_HARNESS)/$(BENCHMARK_WORKLOAD).yaml; \
 	fi
 	$(LLMDBENCHMARK) $(BENCHMARK_CLI_FLAGS) run \
 		-p $(BENCHMARK_NAMESPACE) \
@@ -556,6 +579,7 @@ benchmark-restart-controller: ## Restart WVA controller to flush in-memory state
 
 BURSTY_WORKLOAD    ?= bursty.yaml
 BENCHMARK_WAIT_TIMEOUT ?= 7200
+BENCHMARK_LOG_LEVEL ?= INFO
 BENCHMARK_HARNESS_MEMORY ?= 40Gi
 
 .PHONY: benchmark-run-bursty

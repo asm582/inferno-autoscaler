@@ -1,0 +1,110 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: inferno-webhook
+  namespace: inferno-system
+  labels:
+    app: inferno-webhook
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app: inferno-webhook
+  template:
+    metadata:
+      labels:
+        app: inferno-webhook
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9443"
+    spec:
+      serviceAccountName: inferno-webhook
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchExpressions:
+                - key: app
+                  operator: In
+                  values:
+                  - inferno-webhook
+              topologyKey: kubernetes.io/hostname
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        fsGroup: 65534
+      containers:
+      - name: webhook
+        image: ghcr.io/llm-d/inferno-autoscaler:webhook-latest
+        imagePullPolicy: IfNotPresent
+        command:
+        - /webhook
+        args:
+        - "--port=9443"
+        - "--cert-dir=/etc/webhook/certs"
+        - "--epp-url=http://epp:8080"
+        - "--namespace=default"
+        - "-v=2"
+        ports:
+        - name: webhook
+          containerPort: 9443
+          protocol: TCP
+        env:
+        - name: NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+        volumeMounts:
+        - name: webhook-certs
+          mountPath: /etc/webhook/certs
+          readOnly: true
+        - name: tmp
+          mountPath: /tmp
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 9443
+            scheme: HTTPS
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 9443
+            scheme: HTTPS
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          timeoutSeconds: 5
+          failureThreshold: 3
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+            ephemeral-storage: 100Mi
+          limits:
+            cpu: 500m
+            memory: 512Mi
+            ephemeral-storage: 500Mi
+      volumes:
+      - name: webhook-certs
+        secret:
+          secretName: inferno-webhook-certs
+          defaultMode: 0444
+      - name: tmp
+        emptyDir: {}
+      terminationGracePeriodSeconds: 10

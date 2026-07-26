@@ -1,0 +1,34 @@
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: inferno-pod-selection
+  labels:
+    app: inferno-webhook
+webhooks:
+- name: pod-selection.inferno.dev
+  admissionReviewVersions: ["v1"]
+  clientConfig:
+    service:
+      name: inferno-webhook
+      namespace: inferno-system
+      path: "/mutate"
+      port: 443
+    caBundle: LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSUV6ekNDQWJlZ0F3SUJBZ0lCQVRBTkJna3Foa2lHOXcwQkFRc0ZBREJCTVJzd0dRWURWUVFHRXdKVlV6RWkKTUNBR0ExVUVDaE1aUkdsemRHbHVaeUJXYjNKNVFITjBjbVZsSUZKdmFtZlZ6RVZNQk1HQTFVRUJoTU1SMmw2ClpTQldaOTk1WkQwPQotLS0tLUVORCBDRVJUSUZJQ0FURS0tLS0tCg==  # Self-signed cert for testing; use cert-manager in prod
+  rules:
+  - operations: ["CREATE"]
+    apiGroups: [""]
+    apiVersions: ["v1"]
+    resources: ["pods/eviction"]
+    scope: "Namespaced"
+  failurePolicy: Ignore
+  sideEffects: None
+  timeoutSeconds: 5
+  namespaceSelector:
+    matchExpressions:
+    - key: workload
+      operator: In
+      values:
+      - inference
+  objectSelector:
+    matchLabels: {}
+  reinvocationPolicy: Never
