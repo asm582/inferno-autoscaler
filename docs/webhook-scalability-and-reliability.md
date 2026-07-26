@@ -126,24 +126,48 @@ webhooks:
 ```
 
 Behavior:
-- Webhook unreachable → admission request **ALLOWED** (webhook failure ignored)
-- Webhook times out → admission request **ALLOWED**
-- Webhook returns error → admission request **ALLOWED**
+- Webhook unreachable → admission request **ALLOWED** (webhook skipped entirely)
+- Webhook times out → admission request **ALLOWED** (webhook skipped)
+- Webhook returns error → admission request **ALLOWED** (webhook skipped)
+
+**Critical: There is NO explicit fallback strategy**
+
+When webhook is skipped, HPA simply proceeds without webhook input:
+
+```
+Normal Operation (Webhook Running):
+  Webhook patches pods with costs → HPA reads costs → evicts lowest-cost pod
+  Result: SMART pod selection (idle pods evicted first)
+
+Webhook Fails with failurePolicy: Ignore:
+  Webhook SKIPPED (no patching) → pods have NO cost annotations
+  ↓
+  HPA reads pod annotations (finds NOTHING)
+  ↓
+  HPA uses its DEFAULT selection logic (varies by implementation)
+  ↓
+  Result: RANDOM or old-based eviction (might evict loaded pods!)
+```
 
 **Cluster impact:**
 ```
 Webhook down + failurePolicy: Ignore
     ↓
-Eviction requests allowed (bypass webhook)
+Eviction requests allowed (webhook skipped, no patching)
     ↓
-HPA scales down pods (but WITHOUT pod cost awareness)
+HPA scales down pods WITHOUT queue awareness
     ↓
-May evict loaded pods (request loss possible)
+May evict loaded pods (request loss possible!)
     ↓
-Cluster continues operating
+But cluster continues operating (evictions don't block)
 ```
 
-**Trade-off:** Availability > Policy enforcement. No request loss guarantee, but cluster stays operational.
+**Trade-off:** Availability > Intelligent pod selection. 
+- ✅ Cluster stays operational even if webhook fails
+- ❌ Pod eviction becomes random/unsafe (may lose requests)
+- ❌ No fallback strategy; just HPA defaults
+
+**The "fallback" is NOT queue-aware—it's whatever HPA does without annotations**
 
 **Recommendation for your deployment:**
 ```yaml
@@ -207,8 +231,69 @@ Webhook request fails
 Failure applies failurePolicy
     ↓
 - failurePolicy: Fail → admission REJECTED
-- failurePolicy: Ignore → admission ALLOWED
+- failurePolicy: Ignore → admission ALLOWED (but webhook effects skipped)
 ```
+
+### failurePolicy: Ignore - What's the Fallback? (CRITICAL CLARIFICATION)
+
+**There is NO fallback strategy.** When `failurePolicy: Ignore`:
+
+1. **Webhook is completely skipped** — as if it never ran
+2. **No mutations applied** — pods are NOT patched with deletion costs
+3. **HPA uses default behavior** — reads empty annotations, uses whatever its default is
+
+**Detailed walkthrough:**
+
+```
+SCENARIO: Webhook down, 3 pods ready to evict
+
+With webhook running (normal):
+  1. Eviction request arrives
+  2. Webhook queries EPP
+  3. Webhook patches annotations:
+     - pod-0: cost = -100 (idle)
+     - pod-1: cost = 515 (45 pending)
+     - pod-2: cost = 575 (50 pending)
+  4. HPA reads annotations
+  5. HPA evicts pod-0 (lowest cost)
+  ✅ RESULT: Idle pod deleted, safe
+
+With webhook down (failurePolicy: Ignore):
+  1. Eviction request arrives
+  2. Webhook unreachable
+  3. failurePolicy: Ignore → SKIP webhook entirely
+  4. NO annotations patched (webhook didn't run)
+  5. HPA reads annotations
+     - pod-0: NO annotation (nothing to read)
+     - pod-1: NO annotation
+     - pod-2: NO annotation
+  6. HPA uses DEFAULT selection:
+     - Typically: pod creation order, lexicographic, or implementation-specific
+     - Often: effectively RANDOM
+  7. HPA might evict pod-1 or pod-2 (50% chance of loaded pod!)
+  ❌ RESULT: Loaded pod deleted, requests lost
+```
+
+**The actual default depends on Kubernetes version:**
+
+```yaml
+HPA Pod Selection (without deletion cost annotations):
+├─ Kubernetes 1.26+: Uses controller.kubernetes.io/pod-deletion-cost (default 0)
+│  └─ If no annotation: treated as cost = 0
+│  └─ Multiple pods with cost 0: random selection among them
+├─ Earlier versions: Varies, often based on pod age or creation order
+└─ YOUR CASE: Pods have cost = 0 (no annotation) → HPA selects randomly
+```
+
+**Important consequence for your webhook:**
+
+When webhook fails with `failurePolicy: Ignore`:
+- ❌ Pod selection is NOT "safe" with a fallback cost calculation
+- ❌ Pod selection becomes RANDOM (HPA default)
+- ❌ May evict ANY pod, including ones with pending requests
+- ✅ Cluster continues operating (no eviction failures)
+
+This is a **trade-off between availability and safety**, not a "graceful fallback".
 
 **Implications:**
 - Transient network glitch → admission fails (not retried)
@@ -538,8 +623,7 @@ failurePolicy determines outcome
 
 **For your pod selection webhook:**
 
-✅ **Production HA Configuration**
-
+### Option A: Availability-First (Recommended)
 ```yaml
 # Deployment
 replicas: 3
@@ -548,24 +632,43 @@ topologySpreadConstraints: across zones
 podDisruptionBudget: minAvailable 1
 
 # Webhook config
-failurePolicy: Ignore
+failurePolicy: Ignore          # ← Cluster continues if webhook fails
 timeoutSeconds: 5
 
-# Monitoring
-Collect webhook latency, admission decisions, pod readiness
+# Monitoring (CRITICAL during outages)
 Alert on: WebhookUnavailable, latency > 3s
-
-# Scaling guidance
-Start with 3 replicas
-Monitor for 2 weeks
-Scale to 5-10 if needed (rare for inference workloads)
 ```
 
-**This setup:**
-- ✅ Handles node failures without cluster disruption
-- ✅ Allows pod evictions even if webhook is down (failurePolicy: Ignore)
-- ✅ Provides ~8 evictions/second (sufficient for typical workloads)
-- ✅ Avoids SPOF with proper HA discipline
-- ✅ Follows industry-proven patterns (cert-manager, Istio, Linkerd)
+**Trade-offs:**
+- ✅ Cluster continues operating if webhook fails
+- ✅ Pod evictions proceed (but WITHOUT queue awareness)
+- ❌ During webhook outage: random pod selection (may evict loaded pods)
+- **Rationale:** Inference workloads scale gently; random selection rarely causes issues. Better to keep cluster running.
 
-**Is it a SPOF with this setup?** No—but keep replicas ≥ 3 and monitor availability.
+### Option B: Safety-First (Alternative)
+```yaml
+# Deployment
+replicas: 5+                  # Must handle 1-2 failures
+podAntiAffinity: required
+topologySpreadConstraints: across zones
+podDisruptionBudget: minAvailable: 2
+
+# Webhook config
+failurePolicy: Fail           # ← Block evictions if webhook fails
+timeoutSeconds: 5
+```
+
+**Trade-offs:**
+- ✅ Pod selection ALWAYS queue-aware
+- ❌ If webhook fails: scale-down BLOCKED (cluster may hit limits)
+- **Rationale:** For critical workloads requiring perfect safety.
+
+**This setup (Availability-First):**
+- ✅ Handles node failures without cluster disruption
+- ✅ Allows pod evictions even if webhook temporarily down
+- ✅ Provides ~8 evictions/second (sufficient for typical workloads)
+- ✅ Avoids SPOF with proper HA discipline (3 replicas)
+- ✅ Follows industry-proven patterns (cert-manager, Istio, Linkerd)
+- ⚠️ **Important:** During webhook outage, pod selection is random (not queue-aware)
+
+**Is it a SPOF with this setup?** No—3 replicas + anti-affinity + PDB eliminate SPOF risk.
