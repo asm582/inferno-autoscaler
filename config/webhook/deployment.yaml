@@ -36,10 +36,9 @@ spec:
                   values:
                   - inferno-webhook
               topologyKey: kubernetes.io/hostname
-      securityContext:
-        runAsNonRoot: true
-        runAsUser: 65534
-        fsGroup: 65534
+      # OpenShift: Empty securityContext allows SCC to inject UID/fsGroup
+      # This is required for restricted-v2 SCC (default in OpenShift 4.12+)
+      securityContext: {}
       containers:
       - name: webhook
         image: ghcr.io/llm-d/inferno-autoscaler:webhook-latest
@@ -61,12 +60,9 @@ spec:
           valueFrom:
             fieldRef:
               fieldPath: metadata.namespace
-        securityContext:
-          allowPrivilegeEscalation: false
-          readOnlyRootFilesystem: true
-          capabilities:
-            drop:
-            - ALL
+        # OpenShift: Empty securityContext allows SCC defaults
+        # Webhook will run as non-root UID injected by restricted-v2 SCC
+        securityContext: {}
         volumeMounts:
         - name: webhook-certs
           mountPath: /etc/webhook/certs
