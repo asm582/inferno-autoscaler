@@ -189,6 +189,7 @@ The controller watches `ScaledObject` status changes, the universal abstraction 
 - **In-memory cost calculations:** Controller calculates pod deletion costs in-memory, no persistence
 - **No state storage:** No ConfigMaps, no databases, no side effects beyond pod annotation patches
 - **Stateless:** Each scale-down event independently queries EPP and calculates costs
+- **Lifecycle:** Pods receive annotations only during scale-down events. During scale-up, new pods are created without annotations (acceptable, no eviction during scale-up). On next scale-down, all pods (old and new) receive fresh cost annotations.
 
 **Benefits:**
 - Low API server load (patches only during scale events)
