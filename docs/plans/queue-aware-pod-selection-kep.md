@@ -99,24 +99,25 @@ With Queue-Aware Pod Deletion Cost:
 ```
 KEDA ScaledObject (via Prometheus metrics)
     ↓
-Detects scale-down needed
+Detects scaling needed (up or down)
     ↓
-ScaledObject.status.desiredReplicas decreases
+ScaledObject.status.desiredReplicas changes
     ↓
 HPA patches Deployment/StatefulSet.spec.replicas
     ↓
 Pod Deletion Cost Controller watches ScaledObject
     ↓
-Controller detects: desiredReplicas < currentReplicas
+Controller detects: desiredReplicas changed (any direction)
     ↓
 Controller Action:
   1. Query EPP for queue depth per pod
   2. Calculate cost: cost = (queue×10) + (running×5) - 100
-  3. Patch pods: controller.kubernetes.io/pod-deletion-cost
+  3. Patch ALL pods: controller.kubernetes.io/pod-deletion-cost
     ↓
 ReplicaSet/StatefulSet reads pod-deletion-cost annotation
     ↓
-ReplicaSet/StatefulSet evicts lowest-cost pods first (idle pods) ✓
+On scale-down: ReplicaSet evicts lowest-cost pods first (idle pods) ✓
+On scale-up: New pods immediately have costs, no gap ✓
 ```
 
 ### Components
@@ -181,15 +182,15 @@ The controller watches `ScaledObject` status changes, the universal abstraction 
 ### Controller Scope & Behavior
 
 **Operational Scope:**
-- **Only patches pods during scale-down:** Controller patches pods ONLY when `ScaledObject.status.desiredReplicas < currentReplicas`
+- **Patches pods during scale events:** Controller patches pods when `ScaledObject.status.desiredReplicas` changes (both scale-up and scale-down)
 - **No proactive patching:** Controller does NOT continuously patch all pods when stable
-- **On-demand, event-driven:** Patching triggered by scale-down detection, not by reconciliation cycles
+- **On-demand, event-driven:** Patching triggered by scale event detection, not by reconciliation cycles
 
 **Processing Model:**
 - **In-memory cost calculations:** Controller calculates pod deletion costs in-memory, no persistence
 - **No state storage:** No ConfigMaps, no databases, no side effects beyond pod annotation patches
-- **Stateless:** Each scale-down event independently queries EPP and calculates costs
-- **Lifecycle:** Pods receive annotations only during scale-down events. During scale-up, new pods are created without annotations (acceptable, no eviction during scale-up). On next scale-down, all pods (old and new) receive fresh cost annotations.
+- **Stateless:** Each scale event independently queries EPP and calculates costs
+- **All pods always annotated:** On scale-down events, all running pods are patched with fresh costs. On scale-up events, newly created pods are immediately patched with costs. This ensures all pods have current deletion cost annotations.
 
 **Benefits:**
 - Low API server load (patches only during scale events)
@@ -205,8 +206,9 @@ The controller watches `ScaledObject` status changes, the universal abstraction 
 
 **Event Detection:**
 ```go
-if ScaledObject.Status.DesiredReplicas < ScaledObject.Status.CurrentReplicas {
-    // Scale-down event detected
+if ScaledObject.Status.DesiredReplicas != previousDesiredReplicas {
+    // Scale event detected (up or down)
+    c.PatchAllPods(ctx)  // Always patch on any scale change
 }
 ```
 
