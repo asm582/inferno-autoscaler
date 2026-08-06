@@ -4,17 +4,17 @@
 # (vllm:kv_cache_usage_perc, vllm:num_requests_waiting) instead of EPP pool aggregates.
 #
 # Usage:
-#   ./scripts/setup-keda-vllm-scaling.sh <namespace> <target-resource-name> [--dry-run] [--target-kind KIND] [--target-api-version VERSION]
+#   ./hack/setup-keda-vllm-scaling.sh <namespace> <target-resource-name> [--dry-run] [--target-kind KIND] [--target-api-version VERSION]
 #
 # Examples:
 #   # Create ScaledObject for a Deployment
-#   ./scripts/setup-keda-vllm-scaling.sh my-namespace my-decode-deployment
+#   ./hack/setup-keda-vllm-scaling.sh my-namespace my-decode-deployment
 #
 #   # Create ScaledObject for a LeaderWorkerSet
-#   ./scripts/setup-keda-vllm-scaling.sh my-namespace my-lws-resource --target-kind LeaderWorkerSet --target-api-version leaderworkerset.x-k8s.io/v1alpha1
+#   ./hack/setup-keda-vllm-scaling.sh my-namespace my-lws-resource --target-kind LeaderWorkerSet --target-api-version leaderworkerset.x-k8s.io/v1alpha1
 #
 #   # Dry-run: show what would be created
-#   ./scripts/setup-keda-vllm-scaling.sh my-namespace my-decode-deployment --dry-run
+#   ./hack/setup-keda-vllm-scaling.sh my-namespace my-decode-deployment --dry-run
 #
 
 set -euo pipefail
@@ -151,7 +151,6 @@ log_success "Prerequisites validated"
 log_info "Looking for $TARGET_KIND: $TARGET_NAME in namespace/$NAMESPACE..."
 
 RESOURCE_NAME=$(echo "$TARGET_KIND" | tr '[:upper:]' '[:lower:]' | sed 's/set$/sets/')
-[ "$RESOURCE_NAME" = "leaderworkersets.x-k8s.io" ] && RESOURCE_NAME="leaderworkersets"
 
 if ! kubectl get "$RESOURCE_NAME" -n "$NAMESPACE" "$TARGET_NAME" &>/dev/null; then
     log_error "$TARGET_KIND '$TARGET_NAME' not found in namespace/$NAMESPACE"
@@ -176,7 +175,7 @@ log_success "No existing ScaledObject found"
 
 # === BUILD SCALEDOBJECT MANIFEST ===
 
-POD_REGEX="^${TARGET_NAME}-[a-z0-9-]*$"
+POD_REGEX="^${TARGET_NAME}-[a-z0-9]{5,}$"
 
 MANIFEST=$(cat <<EOF
 apiVersion: keda.sh/v1alpha1
@@ -196,11 +195,12 @@ spec:
   maxReplicaCount: 10
   pollingInterval: 15
   triggers:
-    # KV Cache Utilization Trigger (60%)
-    # Rationale: Router's KV cache scorer uses score = 1 - (usage / 100).
-    # At 60% usage, score drops to 0.4, indicating meaningful degradation in routing quality.
-    # Triggers scale-up before endpoints become strongly deprioritized (70%+).
-    # This threshold respects the router's soft load balancing and scales proactively.
+    # KV Cache Utilization Trigger (0.6 = 60%)
+    # Rationale: vllm:kv_cache_usage_perc is a 0–1 fraction (not 0–100).
+    # At 0.6 (60%), the router's scorer (1 - usage) = 0.4, indicating degradation.
+    # Using sum aggregation to get the total across all pods in the deployment,
+    # divided by pod count, scales the deployment as a whole unit.
+    # TriggerAuthentication must include the service CA bundle or have unsafeSsl: "true".
     - type: prometheus
       name: kv-cache
       metricType: AverageValue
@@ -209,9 +209,10 @@ spec:
       metadata:
         serverAddress: "https://thanos-querier.openshift-monitoring.svc.cluster.local:9091"
         authModes: bearer
+        tlsCertFile: "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
         query: |
-          avg(vllm:kv_cache_usage_perc{namespace="$NAMESPACE",pod=~"$POD_REGEX"})
-        threshold: "60"
+          sum(vllm:kv_cache_usage_perc{namespace="$NAMESPACE",pod=~"$POD_REGEX"}) / count(vllm:kv_cache_usage_perc{namespace="$NAMESPACE",pod=~"$POD_REGEX"})
+        threshold: "0.6"
         activationThreshold: "0"
     # Queue Depth Trigger (30 requests)
     # Rationale: Calculated from pod startup time: (180s / 15s polling) × 1.5 buffer = ~18 reqs.
@@ -226,6 +227,7 @@ spec:
       metadata:
         serverAddress: "https://thanos-querier.openshift-monitoring.svc.cluster.local:9091"
         authModes: bearer
+        tlsCertFile: "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
         query: |
           avg(vllm:num_requests_waiting{namespace="$NAMESPACE",pod=~"$POD_REGEX"})
         threshold: "30"
