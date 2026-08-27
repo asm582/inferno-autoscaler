@@ -193,10 +193,10 @@ preflight() {
   # Credentials. An expired OCP token surfaces as "the server has asked for the
   # client to provide credentials" from every subsequent call, so fail here with
   # something actionable instead of 40 lines of memcache noise.
-  local who
-  who=$(kubectl auth whoami -o jsonpath='{.status.userInfo.username}' 2>/dev/null) \
+  kubectl get ns default >/dev/null 2>&1 \
     || die "not authenticated to the cluster. Run your 'oc login ...' and retry."
-  [[ -n $who ]] || die "not authenticated to the cluster. Run your 'oc login ...' and retry."
+  local who
+  who=$(oc whoami 2>/dev/null || kubectl config view --minify -o jsonpath='{.contexts[0].context.user}' 2>/dev/null || echo "unknown")
   ok "authenticated as ${who} @ $(kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}')"
 
   # Cluster-scoped prerequisites: asserted, never installed. The standalone

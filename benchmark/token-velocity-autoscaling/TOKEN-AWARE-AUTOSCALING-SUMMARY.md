@@ -1,4 +1,4 @@
-# Token-aware autoscaling on llm-d P/D — design summary
+# Token-aware autoscaling on llm-d — design summary
 
 ## Introduction
 
@@ -17,6 +17,11 @@ query's job is to answer *"how many pods' worth of work is outstanding right now
 
 **"Token-aware"** means those queries count **tokens**, not requests. A 8192-token prompt is 16× the work of
 a 512-token one; a request counter rates them the same, and that is the gap this design closes.
+
+**Two topologies, one design.** Sections §1–§7 describe the **P/D-disaggregated** deployment in detail. The
+same token-velocity approach also drives a **co-located** deployment, where each pod runs both phases on a
+single `InferencePool` (this repo's `optimized-baseline/` guide). **§8 covers it** — all the token math carries
+over unchanged; only the query *shape* and the *number* of `ScaledObject`s differ.
 
 ## 1. Prerequisite: measure your prefill token rate
 
@@ -245,6 +250,67 @@ offered rate — it watches **measured `inflight_tokens`**, i.e. the actual back
 anything is dispatched. The request is then routed to the **decode** pod, whose `routing-proxy` sidecar calls
 the prefill pod named in the header, pulls the KV cache back over NIXL, and generates.
 
+## 8. The same design on a co-located (non-P/D) deployment
+
+Everything above assumes prefill and decode live on **separate** pods. The identical token-velocity design also
+drives a **co-located** deployment — each model-server pod runs both phases (`kv_role: kv_both`, a single
+`InferencePool`, one `modelserver` Deployment). This is the `optimized-baseline/` guide in this repo. **The token
+math of §2, §3 and §6 is unchanged**; only the *shape* of the queries and the *number* of `ScaledObject`s differ.
+
+**One ScaledObject, two triggers, one Deployment.** P/D gives each role its own `ScaledObject` so prefill and
+decode scale independently. Co-located has a single pod type, so it uses **one `ScaledObject` carrying both
+triggers**, and KEDA scales the one Deployment to the **max** of the two triggers' desired replica counts:
+
+```
+replicas = max( ceil(prefill_backlog_s ÷ 1.5) , ceil(kv_util ÷ 0.8) )
+```
+
+Whichever phase is the current bottleneck wins. The trade-off vs P/D: **you cannot size prefill and decode
+separately** — a prompt-heavy burst and a generation-heavy burst both scale the *whole* pod. Simpler to operate
+(one calibration, one object), less able to track a lopsided load between the two phases.
+
+**The two queries are the plain form** (from `optimized-baseline/launch-scaledobject.sh`):
+
+```promql
+# prefill — seconds of uncached prefill backlog        (threshold 1.5)
+sum(llm_d_epp_inflight_tokens{producer_name="inflight-load-producer"}) / <V_P>
+
+# decode — pool-wide average KV occupancy              (threshold 0.8)
+avg(vllm:kv_cache_usage_perc{namespace="pd-test"})
+```
+
+Two shape differences from the P/D queries in §4:
+- **No role filter.** There is one pool and every pod does both phases, so the prefill query drops the
+  `endpoint_name=~".*prefill.*"` selector and the decode query drops `pod=~".*decode.*"`.
+- **Decode uses `avg`, not `sum`.** With separate decode pods, P/D *sums* per-pod occupancy so more pods = more
+  cache to fill. Co-located reads the pool as one number: the **average** fullness across identical pods,
+  compared directly to `0.8`.
+
+**No NIXL hop in the idle floor.** V_P is still measured by `calibrate-peak-prefill.sh`, but through the
+co-located path — the first token comes from the *same* pod, with no KV transfer to a separate decode pod. So the
+`ISL/V_P` idle floor of §2 contains no transfer term (there is no side-channel hop to absorb); the
+threshold-from-SLO derivation is otherwise identical.
+
+**Liveness caveat carries over.** `llm_d_epp_inflight_tokens` is still a `GaugeVec` that strands series on
+scale-down (§5), and the shipped co-located prefill query is the plain `sum(...) / V_P` **without** the
+intersection gate. If you see prefill fail to scale back down, add the same
+`and on (target_pod) … llm_d_epp_per_endpoint_queue_size` liveness filter from §5 — the mechanism is identical,
+only the role selector drops out.
+
+**EPP plugins (co-located set — 4 plugins, from `optimized-baseline-plugins.yaml`).** No disaggregation
+machinery: no headers handler, no profile handler, no prefill/decode filters. A single `default` scheduling
+profile:
+
+| Plugin | Purpose |
+|---|---|
+| `approx-prefix-cache-producer` | Tracks which pods already hold a prompt's prefix |
+| `inflight-load-producer` | Publishes per-pod `inflight_tokens` — the prefill trigger's source |
+| `prefix-cache-affinity-filter` | Prefers cache-warm pods; **consumes `peakPrefillThroughput`** |
+| `token-load-scorer` | Ranks pods by queued token load |
+
+A request resolves in that one profile (`prefix-cache-affinity-filter → token-load-scorer → pick`) and is served
+end-to-end by the chosen pod — no header pass, no NIXL transfer.
+
 ## References
 
 The token-velocity approach this design follows — sizing each role by dividing a token rate by that role's
@@ -257,7 +323,8 @@ token throughput, so prefill and decode share a common denominator in tokens/s �
 llm-d documentation:
 
 - [P/D disaggregation guide](https://github.com/llm-d/llm-d/tree/main/guides/pd-disaggregation) — the
-  deployment this summary describes
+  disaggregated deployment §1–§7 describe
+- [`optimized-baseline/`](./optimized-baseline) — the co-located (`kv_both`) deployment of §8, in this repo
 - [`calibrate.sh` guide](https://github.com/llm-d/llm-d/blob/main/guides/recipes/router/calibration/README.md) —
   measuring `peakPrefillThroughput` (§1)
 - [NIXL connector notes](https://github.com/llm-d/llm-d/blob/main/docs/operations/disaggregation/vllm.md) — how
