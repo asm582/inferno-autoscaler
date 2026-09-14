@@ -1,265 +1,50 @@
 name: CI - PR Checks
 
-# Cancel previous runs on the same PR when new commits are pushed
 concurrency:
   group: ci-pr-checks-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: true
 
 on:
   pull_request:
-    branches:
-      - main
-      - dev
   workflow_dispatch:
-    inputs:
-      run_full_tests:
-        description: 'Run full e2e test suite on Kind (check to run full; unchecked runs no e2e)'
-        required: false
-        default: false
-        type: boolean
+
+permissions:
+  contents: read
 
 jobs:
-  # Check if PR contains code changes (not just docs/metadata)
-  check-code-changes:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      pull-requests: read
-    outputs:
-      has_code_changes: ${{ steps.set-output.outputs.has_code_changes }}
-    steps:
-      - name: Checkout source
-        uses: actions/checkout@v6
-
-      - name: Check for code changes
-        if: github.event_name == 'pull_request'
-        uses: dorny/paths-filter@v3
-        id: filter
-        with:
-          predicate-quantifier: 'every'
-          filters: |
-            code:
-              - '**'
-              - '!docs/**'
-              - '!README.md'
-              - '!CONTRIBUTING.md'
-              - '!LICENSE'
-              - '!OWNERS'
-              - '!PROJECT'
-
-      - name: Set output
-        id: set-output
-        run: |
-          if [ "${{ github.event_name }}" != "pull_request" ]; then
-            echo "has_code_changes=true" >> $GITHUB_OUTPUT
-          elif [ -n "${{ steps.filter.outputs.code }}" ]; then
-            echo "has_code_changes=${{ steps.filter.outputs.code }}" >> $GITHUB_OUTPUT
-          else
-            echo "has_code_changes=true" >> $GITHUB_OUTPUT
-          fi
-
+  # Lints what this repository actually ships: the KEDA blueprints, the
+  # benchmark test bed, and the helper scripts. The frozen legacy/ tree is
+  # excluded — it has its own (unwired) workflows.
   lint-and-test:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout source
         uses: actions/checkout@v6
 
-      - name: Sanity check repo contents
-        run: ls -la
+      - name: Shell syntax check
+        run: make lint-scripts
 
-      - name: Extract Go version from go.mod
-        run: sed -En 's/^go (.*)$/GO_VERSION=\1/p' go.mod >> $GITHUB_ENV
-
-      - name: Set up Go with cache
-        uses: actions/setup-go@v6
-        with:
-          go-version: "${{ env.GO_VERSION }}"
-          cache-dependency-path: ./go.sum
-
-      - name: Install dependencies
-        run: go mod download
-
-      - name: Install golangci-lint
-        uses: golangci/golangci-lint-action@v8
-        with:
-          version: v2.10.0
-          args: ""
-
-      - name: Run make build
-        shell: bash
+      - name: Shellcheck
         run: |
-          make build
+          shopt -s globstar nullglob
+          scripts=(hack/**/*.sh benchmark/hack/*.sh)
+          if [ ${#scripts[@]} -eq 0 ]; then
+            echo "No shell scripts to check."
+            exit 0
+          fi
+          shellcheck -x --severity=warning "${scripts[@]}"
 
-      - name: Run make test
-        shell: bash
-        run: |
-          make test
-
-  kustomize-build:
+  # Required status check kept for branch-protection compatibility. There is no
+  # container image built from this branch: this repository ships KEDA manifest
+  # blueprints and the benchmark test bed, not a controller. The deprecated
+  # controller staged under legacy/ is not built or released from main — use the
+  # release-0.9 branch for that.
+  build-image:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout source
-        uses: actions/checkout@v6
-
-      - name: Install kustomize
-        run: make kustomize
-
-      - name: Build kubernetes overlay
-        run: bin/kustomize build config/overlays/cluster-scoped/kubernetes > /dev/null
-
-      - name: Build openshift overlay
-        run: bin/kustomize build config/overlays/namespace-scoped/openshift > /dev/null
-
-      - name: Build namespace-scoped kubernetes overlay
-        run: bin/kustomize build config/overlays/namespace-scoped/kubernetes > /dev/null
-
-  # E2E smoke tests - run automatically on every PR with code changes.
-  # Skip if PR only contains docs/metadata changes.
-  e2e-tests-smoke:
-    runs-on: ubuntu-latest
-    needs: [lint-and-test, check-code-changes]
-    if: github.event_name == 'pull_request' && needs.check-code-changes.outputs.has_code_changes == 'true'
-    timeout-minutes: 60
-    permissions:
-      contents: read
-    steps:
-      - name: Checkout source
-        uses: actions/checkout@v6
-
-      - name: Extract Go version from go.mod
-        run: sed -En 's/^go (.*)$/GO_VERSION=\1/p' go.mod >> $GITHUB_ENV
-
-      - name: Set up Go with cache
-        uses: actions/setup-go@v6
-        with:
-          go-version: "${{ env.GO_VERSION }}"
-          cache-dependency-path: ./go.sum
-
-      - name: Install dependencies
-        run: go mod download
-
-      - name: Install Kind
-        run: deploy/ci-pr-checks/install-kind.sh
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
-      - name: Build WVA image locally
-        id: build-image
-        env:
-          CHECKOUT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-        run: deploy/ci-pr-checks/build-wva-image-local.sh
-
-      - name: Run e2e tests (smoke)
-        shell: bash
-        env:
-          ENVIRONMENT: kind-emulator
-          USE_SIMULATOR: "true"
-          SCALE_TO_ZERO_ENABLED: "false"
-          CREATE_CLUSTER: "true"
-          SCALER_BACKEND: keda
-          LLM_D_ROUTER_VERSION: "v0.9.0"
-          WVA_E2E_SECONDARY_OVERLAY_PATH: ${{ github.workspace }}/test/e2e/testdata/secondary-controller
-          IMG: ${{ steps.build-image.outputs.image }}
-          SKIP_BUILD: "true"
-          DELETE_CLUSTER: "true"
-          KV_SPARE_TRIGGER: "0.5"
-          QUEUE_SPARE_TRIGGER: "4.5"
+      - name: No image to build
         run: |
-          make test-e2e-smoke-with-setup
-
-  # Canonical queue-guide qualification: CPU-only, direct KEDA, and a fresh
-  # disposable Kind cluster. This label is not selected by smoke/full jobs.
-  keda-epp-guide:
-    runs-on: ubuntu-latest
-    needs: [lint-and-test, check-code-changes]
-    if: needs.check-code-changes.outputs.has_code_changes == 'true'
-    # 34m of bounded setup waits + 70m Go timeout, with final diagnostics and
-    # fresh-cluster cleanup still inside the job-level boundary.
-    timeout-minutes: 120
-    permissions:
-      contents: read
-    env:
-      CLUSTER_NAME: wva-keda-epp-guide-${{ github.run_id }}-${{ github.run_attempt }}
-    steps:
-      - name: Checkout source
-        uses: actions/checkout@v6
-
-      - name: Extract Go version from go.mod
-        run: sed -En 's/^go (.*)$/GO_VERSION=\1/p' go.mod >> "$GITHUB_ENV"
-
-      - name: Set up Go with cache
-        uses: actions/setup-go@v6
-        with:
-          go-version: "${{ env.GO_VERSION }}"
-          cache-dependency-path: ./go.sum
-
-      - name: Install dependencies
-        run: go mod download
-
-      - name: Install Kind
-        run: deploy/ci-pr-checks/install-kind.sh
-
-      - name: Run KEDA+EPP guide contract
-        shell: bash
-        run: |
-          make test-e2e-keda-epp-guide-with-setup \
-            CLUSTER_NAME="$CLUSTER_NAME" \
-            LLMD_SOURCE=""
-
-  # Full Kind E2E - runs automatically on every PR with code changes.
-  # Add "e2e-tests-full" as a required status check in branch protection so it appears on every PR
-  # and must run and pass before merge.
-  e2e-tests-full:
-    runs-on: ubuntu-latest
-    needs: [lint-and-test, check-code-changes]
-    if: needs.check-code-changes.outputs.has_code_changes == 'true'
-    timeout-minutes: 90
-    permissions:
-      contents: read
-    steps:
-      - name: Checkout source
-        uses: actions/checkout@v6
-
-      - name: Extract Go version from go.mod
-        run: sed -En 's/^go (.*)$/GO_VERSION=\1/p' go.mod >> $GITHUB_ENV
-
-      - name: Set up Go with cache
-        uses: actions/setup-go@v6
-        with:
-          go-version: "${{ env.GO_VERSION }}"
-          cache-dependency-path: ./go.sum
-
-      - name: Install dependencies
-        run: go mod download
-
-      - name: Install Kind
-        run: deploy/ci-pr-checks/install-kind.sh
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
-      - name: Build WVA image locally
-        id: build-image
-        env:
-          CHECKOUT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-        run: deploy/ci-pr-checks/build-wva-image-local.sh
-
-      - name: Run e2e tests (full)
-        shell: bash
-        env:
-          ENVIRONMENT: kind-emulator
-          USE_SIMULATOR: "true"
-          SCALE_TO_ZERO_ENABLED: "true"
-          CREATE_CLUSTER: "true"
-          SCALER_BACKEND: keda
-          LLM_D_ROUTER_VERSION: "v0.9.0"
-          DEPLOY_LWS: "true"
-          IMG: ${{ steps.build-image.outputs.image }}
-          SKIP_BUILD: "true"
-          DELETE_CLUSTER: "false"
-          # Same simulator saturation tuning as smoke — defaults are too high for reliable scale-up signals.
-          KV_SPARE_TRIGGER: "0.5"
-          QUEUE_SPARE_TRIGGER: "4.5"
-        run: |
-          make test-e2e-full-with-setup
+          echo "No container image is built from main."
+          echo "This repository ships KEDA manifest blueprints (benchmark/config/scenarios/)"
+          echo "and the evaluation test bed (benchmark/)."
+          echo "The deprecated controller under legacy/ is released from the release-0.9 branch."
